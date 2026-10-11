@@ -40,6 +40,12 @@ type sideQuestionState struct {
 	outputTokens int
 }
 
+// sideDeadline bounds one side-question run: context compression plus the
+// streamed answer. Compressing a large snapshot takes several bounded
+// summarize calls and the answer itself may stream for minutes, so 120s cut
+// off legitimate runs on long sessions.
+const sideDeadline = 300 * time.Second
+
 func sideModel(cfg agent.Config, id int64, name string) sidequestion.Model {
 	b, _ := json.Marshal([]any{cfg.Format, cfg.BaseURL, cfg.Model, cfg.ThinkingType, cfg.ReasoningEffort, cfg.Stream, cfg.MaxTokensField, cfg.SessionHeaderKey})
 	h := sha256.Sum256(b)
@@ -409,7 +415,7 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 		return
 	}
 	if created {
-		ctx, cancel := context.WithTimeout(s.ctx, 120*time.Second)
+		ctx, cancel := context.WithTimeout(s.ctx, sideDeadline)
 		s.side.mu.Lock()
 		s.side.runs[e.ID] = sideRun{key: key, parent: p, cancel: cancel, done: make(chan struct{})}
 		s.side.mu.Unlock()
@@ -491,7 +497,7 @@ func (s *Server) runSide(ctx context.Context, cancel context.CancelFunc, e sideq
 		e.Error = "回答已停止"
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			e.Status = "failed"
-			e.Error = "旁路回答超过 120 秒，已停止"
+			e.Error = fmt.Sprintf("旁路回答超过 %d 秒，已停止", int(sideDeadline/time.Second))
 		}
 	} else if runErr != nil {
 		e.Status = "failed"

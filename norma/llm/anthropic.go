@@ -235,6 +235,7 @@ func parseAnthropicResponse(raw []byte) (Message, string, Usage, error) {
 func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 	var f struct {
 		Type         string `json:"type"`
+		Index        int    `json:"index"`
 		ContentBlock struct {
 			Type string `json:"type"`
 			ID   string `json:"id"`
@@ -273,7 +274,7 @@ func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 		}
 	case "content_block_start":
 		if f.ContentBlock.Type == "tool_use" {
-			return StreamEvent{Type: SEToolUseStart, ToolID: f.ContentBlock.ID, ToolName: f.ContentBlock.Name}, true, nil
+			return StreamEvent{Type: SEToolUseStart, ToolID: f.ContentBlock.ID, ToolName: f.ContentBlock.Name, ItemID: fmt.Sprintf("%d", f.Index)}, true, nil
 		}
 	case "content_block_delta":
 		switch f.Delta.Type {
@@ -284,8 +285,13 @@ func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 		case "signature_delta":
 			return StreamEvent{Type: SEThinkingSignature, Text: f.Delta.Signature}, true, nil
 		case "input_json_delta":
-			return StreamEvent{Type: SEToolInputJSON, Text: f.Delta.PartialJSON}, true, nil
+			return StreamEvent{Type: SEToolInputJSON, Text: f.Delta.PartialJSON, ItemID: fmt.Sprintf("%d", f.Index)}, true, nil
 		}
+	case "content_block_stop":
+		// Ends one content block. For tool_use blocks this finalizes the call;
+		// non-tool blocks carry an index with no registered call (a no-op
+		// downstream), so they are emitted unconditionally.
+		return StreamEvent{Type: SEToolUseStop, ItemID: fmt.Sprintf("%d", f.Index)}, true, nil
 	case "message_delta":
 		ev := StreamEvent{Type: SEMessageDelta, StopReason: f.Delta.StopReason}
 		if f.Usage != nil {

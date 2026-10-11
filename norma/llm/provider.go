@@ -22,16 +22,28 @@ const (
 	SEThinkingSignature StreamEventType = "thinking_signature"
 	SEToolUseStart      StreamEventType = "tool_use_start"
 	SEToolInputJSON     StreamEventType = "tool_input_delta"
-	SEMessageDelta      StreamEventType = "message_delta" // carries stop_reason / usage
-	SEMessageStop       StreamEventType = "message_stop"
+	// SEToolUseStop marks one specific call's arguments as final (Responses:
+	// function_call_arguments.done / output_item.done; Anthropic:
+	// content_block_stop). Text optionally carries the authoritative full
+	// argument JSON, used as a fallback when delta fragments were lost.
+	SEToolUseStop  StreamEventType = "tool_use_stop"
+	SEMessageDelta StreamEventType = "message_delta" // carries stop_reason / usage
+	SEMessageStop  StreamEventType = "message_stop"
 )
 
 // StreamEvent is one normalized model-level streaming event (FR-03.5).
 type StreamEvent struct {
-	Type       StreamEventType
-	Text       string // text/thinking/tool_input JSON fragment
-	ToolID     string // tool_use_start
-	ToolName   string // tool_use_start
+	Type     StreamEventType
+	Text     string // text/thinking/tool_input JSON fragment
+	ToolID   string // tool_use_start
+	ToolName string // tool_use_start
+	// ItemID correlates a tool_use_start with its own tool_input_delta and
+	// tool_use_stop events when a stream announces parallel calls before their
+	// argument fragments arrive (Responses: output_item.added item.id == the
+	// function_call_arguments item_id; Anthropic / OpenAI chat: the content
+	// block / tool_calls index). Empty means the provider never interleaves
+	// calls, keeping the legacy sequential assembly path.
+	ItemID     string
 	StopReason string // message_delta
 	Usage      Usage  // message_start / message_delta
 }

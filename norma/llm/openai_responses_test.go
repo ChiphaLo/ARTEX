@@ -36,12 +36,16 @@ func TestResponsesStreaming(t *testing.T) {
 	p, _ := NewProvider(Config{Format: FormatOpenAIResponses, BaseURL: srv.URL, APIKey: "k", Model: "m"})
 	acc := NewAccumulator()
 	var usage Usage
+	stops := 0
 	for ev, err := range p.Stream(context.Background(), CompletionRequest{Messages: []Message{UserText("go")}}) {
 		if err != nil {
 			t.Fatalf("stream err: %v", err)
 		}
 		if ev.Type == SEMessageDelta {
 			usage = ev.Usage
+		}
+		if ev.Type == SEMessageStop {
+			stops++
 		}
 		acc.Add(ev)
 	}
@@ -58,6 +62,25 @@ func TestResponsesStreaming(t *testing.T) {
 	}
 	if usage.InputTokens != 11 || usage.OutputTokens != 6 || usage.CacheReadTokens != 3 {
 		t.Fatalf("usage=%+v", usage)
+	}
+	if stops != 1 {
+		t.Fatalf("terminal markers=%d, want 1", stops)
+	}
+}
+
+func TestResponsesTruncatedStreamHasNoCompletionMarker(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(sse2(event("response.output_text.delta", `{"type":"response.output_text.delta","delta":"partial"}`))))
+	}))
+	defer srv.Close()
+	p, _ := NewProvider(Config{Format: FormatOpenAIResponses, BaseURL: srv.URL, APIKey: "k", Model: "m"})
+	for ev, err := range p.Stream(t.Context(), CompletionRequest{Messages: []Message{UserText("go")}}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Type == SEMessageStop {
+			t.Fatal("truncated stream incorrectly marked complete")
+		}
 	}
 }
 
@@ -104,6 +127,40 @@ func TestResponsesComplete(t *testing.T) {
 	}
 	if usage.InputTokens != 10 || usage.OutputTokens != 5 || usage.CacheReadTokens != 2 {
 		t.Fatalf("usage=%+v", usage)
+	}
+}
+
+// TestResponsesReasoningDisabledExplicit pins the disabled-reasoning contract:
+// a per-request "disabled" must be sent as an explicit effort "none" so
+// gateways that force reasoning by default don't starve small summary calls
+// (bounded max_output_tokens) with hidden reasoning tokens. The enabled path
+// still sends the configured effort.
+func TestResponsesReasoningDisabledExplicit(t *testing.T) {
+	var gotBody map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		raw, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(raw, &gotBody)
+		w.Header().Set("content-type", "application/json")
+		w.Write([]byte(`{"status":"completed","output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"ok"}]}]}`))
+	}))
+	defer srv.Close()
+
+	p, _ := NewProvider(Config{Format: FormatOpenAIResponses, BaseURL: srv.URL, APIKey: "k", Model: "m", ReasoningEffort: "max"})
+
+	if _, _, _, err := p.Complete(context.Background(), CompletionRequest{Messages: []Message{UserText("sum")}, Thinking: "disabled", MaxTokens: 64}); err != nil {
+		t.Fatalf("disabled Complete err: %v", err)
+	}
+	reasoning, _ := gotBody["reasoning"].(map[string]any)
+	if reasoning == nil || reasoning["effort"] != "none" {
+		t.Fatalf("disabled reasoning=%v, want effort none", gotBody["reasoning"])
+	}
+
+	if _, _, _, err := p.Complete(context.Background(), CompletionRequest{Messages: []Message{UserText("go")}, MaxTokens: 64}); err != nil {
+		t.Fatalf("enabled Complete err: %v", err)
+	}
+	reasoning, _ = gotBody["reasoning"].(map[string]any)
+	if reasoning == nil || reasoning["effort"] != "max" {
+		t.Fatalf("enabled reasoning=%v, want effort max", gotBody["reasoning"])
 	}
 }
 

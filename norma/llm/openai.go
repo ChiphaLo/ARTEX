@@ -7,6 +7,7 @@ import (
 	"io"
 	"iter"
 	"net/http"
+	"strconv"
 	"strings"
 )
 
@@ -50,14 +51,14 @@ type oaReq struct {
 	// MaxTokens and MaxCompletionTokens are mutually exclusive: buildBody fills
 	// exactly one of them per Config.MaxTokensField, and omitempty drops the
 	// other. Sending both would make OpenAI reject the request.
-	MaxTokens           int      `json:"max_tokens,omitempty"`
-	MaxCompletionTokens int      `json:"max_completion_tokens,omitempty"`
-	Temperature         *float64 `json:"temperature,omitempty"`
-	Stop            []string      `json:"stop,omitempty"`
-	Thinking        *oaThinking   `json:"thinking,omitempty"`
-	ReasoningEffort string        `json:"reasoning_effort,omitempty"`
-	Stream          bool          `json:"stream"`
-	StreamOptions   *oaStreamOpts `json:"stream_options,omitempty"`
+	MaxTokens           int           `json:"max_tokens,omitempty"`
+	MaxCompletionTokens int           `json:"max_completion_tokens,omitempty"`
+	Temperature         *float64      `json:"temperature,omitempty"`
+	Stop                []string      `json:"stop,omitempty"`
+	Thinking            *oaThinking   `json:"thinking,omitempty"`
+	ReasoningEffort     string        `json:"reasoning_effort,omitempty"`
+	Stream              bool          `json:"stream"`
+	StreamOptions       *oaStreamOpts `json:"stream_options,omitempty"`
 }
 
 type oaStreamOpts struct {
@@ -550,12 +551,13 @@ func parseOpenAIFrame(data string, started map[int]bool) (evs []StreamEvent, sto
 		evs = append(evs, StreamEvent{Type: SETextDelta, Text: ch.Delta.Refusal})
 	}
 	for _, tc := range ch.Delta.ToolCalls {
+		key := strconv.Itoa(tc.Index)
 		if !started[tc.Index] && (tc.ID != "" || tc.Function.Name != "") {
 			started[tc.Index] = true
-			evs = append(evs, StreamEvent{Type: SEToolUseStart, ToolID: tc.ID, ToolName: tc.Function.Name})
+			evs = append(evs, StreamEvent{Type: SEToolUseStart, ToolID: tc.ID, ToolName: tc.Function.Name, ItemID: key})
 		}
 		if tc.Function.Arguments != "" {
-			evs = append(evs, StreamEvent{Type: SEToolInputJSON, Text: tc.Function.Arguments})
+			evs = append(evs, StreamEvent{Type: SEToolInputJSON, Text: tc.Function.Arguments, ItemID: key})
 		}
 	}
 	if ch.FinishReason != "" {

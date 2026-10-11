@@ -796,25 +796,91 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 	exec = newStreamExec(l)
 	acc := llm.NewAccumulator()
 
-	var building bool
-	var curID, curName string
-	var curInput strings.Builder
-	finalizeTool := func() bool { // false = consumer stopped
-		if !building {
-			return true
+	// A stream may announce several parallel calls before any of their argument
+	// fragments arrive (the Responses API emits one output_item.added per call
+	// first, then function_call_arguments.delta frames keyed by item_id). Keep
+	// one slot per call, route fragments/stops by that key, and finalize each
+	// call as its own completion arrives — a single "current call" slot garbles
+	// parallel calls whose starts are batched. Providers that never interleave
+	// keep the legacy single-slot behavior through the fallback slot below.
+	type pendingCall struct {
+		id, name string
+		key      string
+		input    strings.Builder
+		stopText string // authoritative full arguments from a tool_use_stop
+	}
+	var calls []*pendingCall // arrival order; also the dispatch order
+	byKey := map[string]*pendingCall{}
+	var last *pendingCall
+
+	routeInput := func(itemID string) *pendingCall {
+		if itemID != "" {
+			if p := byKey[itemID]; p != nil {
+				return p
+			}
 		}
-		building = false
-		raw := strings.TrimSpace(curInput.String())
-		curInput.Reset()
+		return last // legacy fallback: most recently started call
+	}
+	routeStop := func(itemID string) *pendingCall {
+		if itemID != "" {
+			return byKey[itemID] // exact match only; unknown keys are no-ops
+		}
+		return last
+	}
+	drop := func(p *pendingCall) {
+		for i, q := range calls {
+			if q == p {
+				calls = append(calls[:i], calls[i+1:]...)
+				break
+			}
+		}
+		if p.key != "" {
+			delete(byKey, p.key)
+		}
+		if last == p {
+			last = nil
+		}
+	}
+	finalizeCall := func(p *pendingCall) bool { // false = consumer stopped
+		raw := strings.TrimSpace(p.input.String())
+		if raw == "" || !jsonValid(raw) {
+			if alt := strings.TrimSpace(p.stopText); alt != "" && jsonValid(alt) {
+				raw = alt
+			}
+		}
 		if raw == "" || !jsonValid(raw) {
 			raw = "{}"
 		}
-		block := llm.ContentBlock{Type: llm.BlockToolUse, ID: curID, Name: curName, Input: []byte(raw)}
+		block := llm.ContentBlock{Type: llm.BlockToolUse, ID: p.id, Name: p.name, Input: []byte(raw)}
 		if !l.emit(Event{Kind: KindToolUse, ToolUse: &block}) {
 			return false
 		}
 		exec.add(block)
 		return exec.drain()
+	}
+	finalizeAll := func() bool {
+		for len(calls) > 0 {
+			p := calls[0]
+			if !finalizeCall(p) {
+				return false
+			}
+			drop(p)
+		}
+		return true
+	}
+	// flushComplete finalizes already-complete calls when a new one starts, so
+	// sequential streams still dispatch tools mid-stream (FR-01.4); calls whose
+	// fragments have not arrived yet (batched parallel starts) stay pending.
+	flushComplete := func() bool {
+		for _, p := range append([]*pendingCall(nil), calls...) {
+			if raw := strings.TrimSpace(p.input.String()); raw != "" && jsonValid(raw) {
+				if !finalizeCall(p) {
+					return false
+				}
+				drop(p)
+			}
+		}
+		return true
 	}
 
 	for ev, e := range l.deps.CallModel(l.ctx, req) {
@@ -822,31 +888,63 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 			err = e
 			break
 		}
-		if ev.Type == llm.SEToolInputJSON {
-			if building {
-				curInput.WriteString(ev.Text)
+		switch ev.Type {
+		case llm.SEToolInputJSON:
+			if p := routeInput(ev.ItemID); p != nil {
+				p.input.WriteString(ev.Text)
+			}
+			acc.Add(ev)
+			continue
+		case llm.SEToolUseStop:
+			if p := routeStop(ev.ItemID); p != nil {
+				if ev.Text != "" {
+					p.stopText = ev.Text
+				}
+				if !finalizeCall(p) {
+					return asst, exec, "", nil, true, false
+				}
+				drop(p)
 			}
 			acc.Add(ev)
 			continue
 		}
-		if !finalizeTool() {
-			return asst, exec, "", nil, true, false
-		}
 		switch ev.Type {
 		case llm.SETextDelta:
+			if !finalizeAll() {
+				return asst, exec, "", nil, true, false
+			}
 			if ev.Text != "" && !l.emit(Event{Kind: KindText, Text: ev.Text}) {
 				return asst, exec, "", nil, true, false
 			}
 		case llm.SEThinkingDelta:
+			if !finalizeAll() {
+				return asst, exec, "", nil, true, false
+			}
 			if ev.Text != "" && !l.emit(Event{Kind: KindThinking, Text: ev.Text}) {
 				return asst, exec, "", nil, true, false
 			}
 		case llm.SEToolUseStart:
-			curID, curName, building = ev.ToolID, ev.ToolName, true
+			key := ev.ItemID
+			if key == "" {
+				key = ev.ToolID
+			}
+			p := &pendingCall{id: ev.ToolID, name: ev.ToolName, key: key}
+			calls = append(calls, p)
+			if key != "" {
+				byKey[key] = p
+			}
+			last = p
+			if !flushComplete() {
+				return asst, exec, "", nil, true, false
+			}
+		default:
+			if !finalizeAll() {
+				return asst, exec, "", nil, true, false
+			}
 		}
 		acc.Add(ev)
 	}
-	if !finalizeTool() {
+	if !finalizeAll() {
 		return asst, exec, "", nil, true, false
 	}
 	l.usage.Add(acc.Usage)

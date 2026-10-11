@@ -314,6 +314,17 @@ func (s *Server) pgConversationMessages(w http.ResponseWriter, r *http.Request) 
 	running := s.chatBusy[s.convBusyKey(c.ID)]
 	s.chatMu.Unlock()
 
+	writePage := func(items []db.Activity, cursor int64, hasMore bool) {
+		// Read totals after the page, so a final result included in this poll
+		// cannot be displayed alongside an older, incomplete token snapshot.
+		tokens, err := pg.ConversationTokens(c.ID)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": hasMore, "tokens": tokens})
+	}
+
 	// Incremental tail: ?since=N returns steps after id N (ASC) — used by the live
 	// poll and the post-send fetch. A generous cap so a burst is never dropped.
 	if sv := q.Get("since"); sv != "" {
@@ -323,7 +334,7 @@ func (s *Server) pgConversationMessages(w http.ResponseWriter, r *http.Request) 
 			writeErr(w, 500, err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": false})
+		writePage(items, cursor, false)
 		return
 	}
 
@@ -340,7 +351,7 @@ func (s *Server) pgConversationMessages(w http.ResponseWriter, r *http.Request) 
 	if n := len(items); n > 0 {
 		cursor = items[n-1].ID
 	}
-	writeJSON(w, 200, map[string]any{"items": activityDTOs(items), "cursor": cursor, "running": running, "hasMore": hasMore})
+	writePage(items, cursor, hasMore)
 }
 
 // pgConversationMsgDetail lazily returns one step's full detail blob.

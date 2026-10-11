@@ -309,3 +309,82 @@ func TestSideOverflowWithoutReductionDoesNotRepeatAnswer(t *testing.T) {
 		t.Fatalf("no-progress recovery: %d %d %+v %v", answers, summaries, out, err)
 	}
 }
+
+func TestSideSummaryMaterialDropsThinking(t *testing.T) {
+	in := []llm.Message{
+		llm.UserText("keep me"),
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+			{Type: llm.BlockThinking, Thinking: "THINKING-SECRET", Signature: "sig"},
+			llm.TextBlock("visible answer"),
+		}},
+		{Role: llm.RoleAssistant, Content: []llm.ContentBlock{{Type: llm.BlockThinking, Thinking: "ONLY-THINKING"}}},
+		{Role: llm.RoleUser, Content: []llm.ContentBlock{
+			{Type: llm.BlockToolResult, ToolUseID: "t1", Content: []llm.ContentBlock{
+				{Type: llm.BlockThinking, Thinking: "NESTED-THINKING"},
+				llm.TextBlock("tool evidence"),
+			}},
+		}},
+	}
+	out := summaryMaterial(in)
+	data := string(mustJSON(t, out))
+	for _, marker := range []string{"THINKING-SECRET", "ONLY-THINKING", "NESTED-THINKING"} {
+		if strings.Contains(data, marker) {
+			t.Fatalf("thinking leaked into summary material: %s", marker)
+		}
+	}
+	for _, marker := range []string{"keep me", "visible answer", "tool evidence"} {
+		if !strings.Contains(data, marker) {
+			t.Fatalf("evidence dropped: %s", marker)
+		}
+	}
+	if len(out) != 3 {
+		t.Fatalf("thinking-only message kept: %d", len(out))
+	}
+	if len(in[1].Content) != 2 || in[3].Content[0].Content[0].Type != llm.BlockThinking {
+		t.Fatal("input mutated")
+	}
+}
+
+// A snapshot whose payload is dominated by signed thinking must compress in a
+// single bounded summarize call, and the thinking text must never reach the
+// summarizer: with it, the same material needed many serial calls and blew the
+// request deadline on long sessions.
+func TestSideHugeThinkingSnapshotCompactsWithoutThinking(t *testing.T) {
+	snap := Snapshot{Request: fixture(), Model: Model{WindowTokens: 32000}}
+	blob := strings.Repeat("THINKING-BLOB-", 12000) // ~168KB, ~56k estimated tokens
+	snap.Request.Messages = append([]llm.Message{{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+		{Type: llm.BlockThinking, Thinking: blob, Signature: "signed"},
+		llm.TextBlock("old conclusion"),
+	}}}, snap.Request.Messages...)
+	calls, answers := 0, 0
+	var final llm.CompletionRequest
+	p := fakeProvider{complete: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+		if r.Thinking == "disabled" {
+			calls++
+			if strings.Contains(r.Messages[0].Text(), "THINKING-BLOB") {
+				t.Fatal("thinking leaked into the summarize request")
+			}
+			if !strings.Contains(r.Messages[0].Text(), "old conclusion") {
+				t.Fatal("summarized prefix lost its visible text")
+			}
+			return assistant("summary: old conclusion"), "end_turn", llm.Usage{OutputTokens: 3}, nil
+		}
+		answers++
+		final = r
+		return assistant("done"), "end_turn", llm.Usage{OutputTokens: 5}, nil
+	}}
+	var memory Memory
+	out, info, err := (SideQuestionService{p}).Respond(t.Context(), snap, "progress?", replayFixture(nil, &memory), ContextOptions{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || answers != 1 {
+		t.Fatalf("thinking payload not dropped before chunking: calls=%d answers=%d info=%+v", calls, answers, info)
+	}
+	if out.Usage.OutputTokens != 8 {
+		t.Fatalf("usage: %+v", out.Usage)
+	}
+	if !strings.Contains(string(mustJSON(t, final)), "old conclusion") {
+		t.Fatal("summary missing from the final request")
+	}
+}

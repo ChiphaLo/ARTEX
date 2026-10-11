@@ -72,9 +72,17 @@ func (p *openaiResponsesProvider) buildBody(req CompletionRequest, stream bool) 
 		Store:           false, // stateless: full history sent each call
 	}
 	// reasoning.effort is the Responses equivalent of reasoning_effort. A
-	// per-request "disabled" (compaction's summary call) suppresses it; otherwise
-	// send it only when configured.
-	if req.Thinking != "disabled" && p.cfg.ReasoningEffort != "" {
+	// per-request "disabled" (compaction's summary call) must be sent as an
+	// explicit "none": omitting the field lets gateways fall back to their
+	// default (forced) reasoning, which eats the small output budget of summary
+	// calls and truncates them at max_output_tokens. Otherwise send the
+	// configured effort.
+	switch {
+	case req.Thinking == "disabled":
+		if p.cfg.ReasoningEffort != "" {
+			body.Reasoning = &orReasoning{Effort: "none"}
+		}
+	case p.cfg.ReasoningEffort != "":
 		body.Reasoning = &orReasoning{Effort: p.cfg.ReasoningEffort}
 	}
 	for _, t := range req.Tools {
@@ -170,6 +178,14 @@ func (p *openaiResponsesProvider) Stream(ctx context.Context, req CompletionRequ
 			if !yield(ev, nil) {
 				return
 			}
+			// Responses puts final usage and the terminal status in one frame,
+			// rather than sending a separate message_stop like Anthropic. Keep
+			// both neutral events: consumers need usage first and an explicit
+			// completion marker to distinguish success from a truncated stream.
+			if ev.Type == SEMessageDelta && ev.StopReason != "" {
+				yield(StreamEvent{Type: SEMessageStop}, nil)
+				return
+			}
 		}
 	}
 }
@@ -182,15 +198,19 @@ func parseResponsesFrame(event, data string) (StreamEvent, bool, error) {
 	// and put the discriminator only in the JSON `type` field, so fall back to it.
 	var f struct {
 		Type string `json:"type"`
-		// output_item.added: item carries the function_call id/name.
+		// output_item.added/.done: item carries the function_call id/name/args.
+		// item.id is the stable key the delta frames echo back as item_id.
 		Item struct {
+			ID        string `json:"id"`
 			Type      string `json:"type"`
 			CallID    string `json:"call_id"`
 			Name      string `json:"name"`
 			Arguments string `json:"arguments"`
 		} `json:"item"`
-		Delta    string `json:"delta"` // *_text.delta / function_call_arguments.delta
-		Response struct {
+		ItemID    string `json:"item_id"`   // function_call_arguments.delta/.done
+		Arguments string `json:"arguments"` // function_call_arguments.done: full JSON
+		Delta     string `json:"delta"`     // *_text.delta / function_call_arguments.delta
+		Response  struct {
 			Status            string `json:"status"`
 			IncompleteDetails *struct {
 				Reason string `json:"reason"`
@@ -211,7 +231,12 @@ func parseResponsesFrame(event, data string) (StreamEvent, bool, error) {
 	switch kind {
 	case "response.output_item.added":
 		if f.Item.Type == "function_call" {
-			return StreamEvent{Type: SEToolUseStart, ToolID: f.Item.CallID, ToolName: f.Item.Name}, true, nil
+			return StreamEvent{Type: SEToolUseStart, ToolID: f.Item.CallID, ToolName: f.Item.Name, ItemID: f.Item.ID}, true, nil
+		}
+	case "response.output_item.done":
+		// A completed function_call item carries the authoritative full arguments.
+		if f.Item.Type == "function_call" {
+			return StreamEvent{Type: SEToolUseStop, ItemID: f.Item.ID, Text: f.Item.Arguments}, true, nil
 		}
 	case "response.output_text.delta":
 		if f.Delta != "" {
@@ -223,8 +248,10 @@ func parseResponsesFrame(event, data string) (StreamEvent, bool, error) {
 		}
 	case "response.function_call_arguments.delta":
 		if f.Delta != "" {
-			return StreamEvent{Type: SEToolInputJSON, Text: f.Delta}, true, nil
+			return StreamEvent{Type: SEToolInputJSON, Text: f.Delta, ItemID: f.ItemID}, true, nil
 		}
+	case "response.function_call_arguments.done":
+		return StreamEvent{Type: SEToolUseStop, ItemID: f.ItemID, Text: f.Arguments}, true, nil
 	case "response.completed", "response.incomplete":
 		ev := StreamEvent{Type: SEMessageDelta, StopReason: "end_turn"}
 		if f.Response.IncompleteDetails != nil && f.Response.IncompleteDetails.Reason == "max_output_tokens" {

@@ -210,6 +210,40 @@ func snapshotSummaryMessages(summary string, tail []llm.Message) []llm.Message {
 	return append([]llm.Message{llm.UserText("[当前主上下文的早期摘要；摘要可能省略细节，不足以判断时请明确说明]\n" + summary)}, tail...)
 }
 
+// summaryMaterial is the serialized form handed to the summarizer. Signed
+// thinking blocks are dropped first: they often dominate a large snapshot's
+// payload (measured >80% on long sessions) yet carry no evidence a summary
+// must keep, and retaining them forces many more bounded summarize calls than
+// the request deadline allows. The retained tail still replays the original
+// structured messages, including thinking.
+func summaryMaterial(messages []llm.Message) []llm.Message {
+	out := make([]llm.Message, 0, len(messages))
+	for _, m := range messages {
+		blocks := make([]llm.ContentBlock, 0, len(m.Content))
+		for _, b := range m.Content {
+			if b.Type == llm.BlockThinking {
+				continue
+			}
+			if b.Type == llm.BlockToolResult {
+				kept := make([]llm.ContentBlock, 0, len(b.Content))
+				for _, inner := range b.Content {
+					if inner.Type == llm.BlockThinking {
+						continue
+					}
+					kept = append(kept, inner)
+				}
+				b.Content = kept
+			}
+			blocks = append(blocks, b)
+		}
+		if len(blocks) == 0 {
+			continue
+		}
+		out = append(out, llm.Message{Role: m.Role, Content: blocks})
+	}
+	return out
+}
+
 func (b *contextBuilder) compactSnapshot(ctx context.Context, base []llm.Message, keepTokens int, key string) ([]llm.Message, error) {
 	b.progress("compressing_snapshot")
 	groups := messageGroups(base)
@@ -235,7 +269,13 @@ func (b *contextBuilder) compactSnapshot(ctx context.Context, base []llm.Message
 	}
 	// Serialize only the portion being summarized. The retained suffix stays
 	// in norma's structured message representation, including signed thinking.
-	data, err := json.Marshal(base[:start])
+	material := summaryMaterial(base[:start])
+	if len(material) == 0 {
+		// The prefix carried no user-visible content (for example only signed
+		// thinking blocks); there is nothing worth summarizing.
+		return base[start:], nil
+	}
+	data, err := json.Marshal(material)
 	if err != nil {
 		return nil, err
 	}

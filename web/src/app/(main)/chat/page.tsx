@@ -58,7 +58,7 @@ import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
 import { isBtwCommand } from "@/lib/side-questions";
-import type { Activity, Agent, ChatAttachment, Conversation, LLMProfile } from "@/lib/types";
+import type { Activity, Agent, ChatAttachment, Conversation, ConversationTokenTotal, LLMProfile } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 // fmtBytes renders a human file size for attachment chips (mirrors transcript.tsx).
@@ -496,6 +496,7 @@ function ChatView({
 }) {
   const approvalFocus = useApprovalFocus({ conversationId: conv.id });
   const [messages, setMessages] = React.useState<Activity[]>([]);
+  const [tokenStats, setTokenStats] = React.useState<ConversationTokenTotal | null>(null);
   const [running, setRunning] = React.useState(false);
   const [input, setInput] = React.useState(initial?.input ?? "");
   const [sending, setSending] = React.useState(false);
@@ -545,6 +546,7 @@ function ChatView({
     hasMoreRef.current = false;
     setHasMore(false);
     setMessages([]);
+    setTokenStats(null);
     setHistoryLoaded(false);
     setRunning(false);
     let live = true;
@@ -553,6 +555,7 @@ function ChatView({
       .then((r) => {
         if (!live) return;
         setMessages((current) => mergeActivities(r.items, current));
+        setTokenStats(r.tokens ?? null);
         cursorRef.current = Math.max(cursorRef.current, r.cursor);
         earliestRef.current = r.items.length ? r.items[0].seq : 0;
         hasMoreRef.current = r.hasMore;
@@ -586,6 +589,7 @@ function ChatView({
       try {
         const r = await api.conversationMessages(conv.id, cursorRef.current);
         if (!live) return;
+        if (r.tokens) setTokenStats(r.tokens);
         if (r.items.length) {
           setMessages((prev) => mergeActivities(prev, r.items));
         }
@@ -678,9 +682,14 @@ function ChatView({
     if (vp) vp.scrollTop = vp.scrollHeight;
   }, [messages, running, viewport, approvalFocus.state]);
 
-  // Per-conversation token total, live — same accounting as the main-agent
-  // console: completed runs' `result` sum + the in-progress run's latest `usage`.
+  // Full-conversation totals come from the backend, not the loaded transcript
+  // window (opening a long chat loads only its latest 200 activities). Keep the
+  // local calculation only for older servers and the mock preview.
   const tokenTotal = React.useMemo(() => {
+    if (tokenStats) {
+      const { input_tokens: i, output_tokens: o, cache_read_tokens: cr, turns } = tokenStats;
+      return { i, o, cr, turns, any: i + o + cr > 0 };
+    }
     let i = 0,
       o = 0,
       cr = 0;
@@ -705,7 +714,7 @@ function ChatView({
       O = o + lo,
       CR = cr + lcr;
     return { i: I, o: O, cr: CR, turns, any: I + O + CR > 0 };
-  }, [messages]);
+  }, [messages, tokenStats]);
 
   // pickFiles uploads into this conversation's session dir (sessions/conv-<id>/
   // uploads/) and queues the returned metadata to send with the next message.

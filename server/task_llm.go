@@ -387,7 +387,7 @@ func streamEventCommitsOutput(event llm.StreamEvent) bool {
 	switch event.Type {
 	case llm.SETextDelta, llm.SEThinkingDelta, llm.SEToolInputJSON:
 		return event.Text != ""
-	case llm.SEToolUseStart, llm.SEMessageDelta, llm.SEMessageStop:
+	case llm.SEToolUseStart, llm.SEToolUseStop, llm.SEMessageDelta, llm.SEMessageStop:
 		return true
 	default:
 		return false

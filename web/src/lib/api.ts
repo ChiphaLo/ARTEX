@@ -25,6 +25,7 @@ import type {
   CompanyScopeMutation,
   CompanyScopeRule,
   Conversation,
+  ConversationTokenTotal,
   ConvTokenSummary,
   CoverageAssetRefs,
   CoverageGraphData,
@@ -1018,17 +1019,17 @@ export const api = {
     post<{ items: { id: number; ok: boolean; error?: string }[] }>("/conversations/delete/batch", { ids }),
   // Incremental tail: steps after `since` (id ASC) — live poll + post-send fetch.
   conversationMessages: (id: number, since = 0) =>
-    get<{ items: Activity[]; cursor: number; running: boolean }>(`/conversations/${id}/messages?since=${since}`).then(
-      (r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running }),
+    get<{ items: Activity[]; cursor: number; running: boolean; tokens?: ConversationTokenTotal }>(`/conversations/${id}/messages?since=${since}`).then(
+      (r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, tokens: r.tokens }),
     ),
   // Reverse pagination: the latest `limit` steps (before=0) or the page of older
   // steps ending before id `before`. hasMore = still-older steps exist.
   conversationHistory: (id: number, before = 0, limit = 200) => {
     const q = new URLSearchParams({ limit: String(limit) });
     if (before > 0) q.set("before", String(before));
-    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean }>(
+    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean; tokens?: ConversationTokenTotal }>(
       `/conversations/${id}/messages?${q.toString()}`,
-    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, hasMore: !!r.hasMore }));
+    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, hasMore: !!r.hasMore, tokens: r.tokens }));
   },
   conversationMsgDetail: (id: number, seq: number) =>
     get<{ detail: string }>(`/conversations/${id}/messages/${seq}`).then((r) => r.detail ?? ""),

@@ -1380,6 +1380,15 @@ export interface SSTask {
 
 // ConvTokenSummary — one conversation's token total (+ profile/date) for merging
 // chat usage into the dashboard token stats. GET /api/tokens/conversations.
+// Full-chat accounting returned with every transcript page/tail response.
+export interface ConversationTokenTotal {
+  input_tokens: number;
+  output_tokens: number;
+  cache_read_tokens: number;
+  cache_write_tokens: number;
+  turns: number;
+}
+
 export interface ConvTokenSummary {
   llm_profile_id: number | null;
   created_at: string;
