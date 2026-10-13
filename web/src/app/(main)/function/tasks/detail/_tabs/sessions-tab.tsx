@@ -27,6 +27,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AgentInbox, useInboxRequestID } from "@/components/agent-inbox";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
@@ -50,6 +51,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSideQuestions } from "@/hooks/use-side-questions";
+import type { AgentMessageMode } from "@/lib/api";
 import { api, sseUrl } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { MOCK } from "@/lib/mock/enabled";
@@ -531,6 +533,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [loadingOlderIntents, setLoadingOlderIntents] = React.useState(false);
   const [input, setInput] = React.useState("");
   const [sending, setSending] = React.useState(false);
+  const inboxRequestID = useInboxRequestID();
+  const [inboxRefresh, setInboxRefresh] = React.useState(0);
   const [stopping, setStopping] = React.useState(false);
   const [mainChatRunning, setMainChatRunning] = React.useState<boolean | null>(null);
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
@@ -1491,11 +1495,22 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     void api.stopChat(taskId).finally(() => setStopping(false));
   }
 
-  function send() {
+  function send(mode: AgentMessageMode = "queue") {
     const text = input.trim();
     const atts = attachments;
     if (side.handleCommand(text, () => setInput(""))) return;
-    if ((!text && atts.length === 0) || sending || mainBusy) return;
+    if ((!text && atts.length === 0) || sending || uploading) return;
+    if ([...text].length > 4000) {
+      toast.error("消息最多 4000 字");
+      return;
+    }
+    const requestID = inboxRequestID.getID({
+      scope: taskId,
+      seg: active.seg ?? 0,
+      mode,
+      message: text,
+      attachments: atts,
+    });
     // No optimistic echo: the backend persists+broadcasts the human turn before it
     // returns, so it streams back over SSE (worker="mainagent") with its real DB
     // seq — the transcript renders it from server data like every other step. Clear
@@ -1505,10 +1520,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     setSending(true);
     chatStatusRequestRef.current++;
     api
-      .chat(text, taskId, atts.length > 0 ? atts : undefined, active.seg ?? 0)
-      .then(({ mode }) => {
-        chatStatusRequestRef.current++;
-        setMainChatRunning(mode === "llm");
+      .chat(text, taskId, atts.length > 0 ? atts : undefined, active.seg ?? 0, mode, requestID)
+      .then(() => {
+        inboxRequestID.clear();
+        setInboxRefresh((v) => v + 1);
       })
       .catch((e) => {
         setInput(text); // restore so the user doesn't lose their text / attachments
@@ -1910,6 +1925,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             </ScrollArea>
             {isMain ? (
               <div className="border-t p-3">
+                <AgentInbox base={`/tasks/${taskId}/chat/inbox?seg=${active.seg ?? 0}`} refreshKey={inboxRefresh} />
                 {attachments.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
                     {attachments.map((a) => (
@@ -1946,7 +1962,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     rows={1}
                     aria-label="给主 Agent 发消息"
                     placeholder={
-                      mainBusy ? "主 Agent 正在运行，可输入 /btw 提问…" : "给主 Agent 发消息，@ 引用漏洞、资产等…"
+                      mainBusy
+                        ? "运行中：Enter 排队，Steer 不打断；/btw 旁路提问…"
+                        : "给主 Agent 发消息，@ 引用漏洞、资产等…"
                     }
                     value={input}
                     disabled={sending}
@@ -1963,16 +1981,38 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       size="icon-xs"
                       variant="ghost"
                       onClick={() => fileInputRef.current?.click()}
-                      disabled={mainBusy || uploading}
+                      disabled={sending || uploading}
                       title="上传文件"
                       aria-label="上传文件"
                     >
                       {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
                     </InputGroupButton>
                     {mainBusy && isBtwCommand(input) && (
-                      <InputGroupButton size="icon-xs" onClick={send} aria-label="发送旁路问题">
+                      <InputGroupButton size="icon-xs" onClick={() => send()} aria-label="发送旁路问题">
                         <ArrowUpIcon />
                       </InputGroupButton>
+                    )}
+                    {!isBtwCommand(input) && (
+                      <>
+                        <InputGroupButton
+                          size="sm"
+                          variant="outline"
+                          onClick={() => send("steer")}
+                          disabled={sending || uploading || (!input.trim() && !attachments.length)}
+                          title="当前工具批次结束后接收，不打断运行"
+                        >
+                          Steer
+                        </InputGroupButton>
+                        <InputGroupButton
+                          size="sm"
+                          variant="outline"
+                          onClick={() => send("queue")}
+                          disabled={sending || uploading || (!input.trim() && !attachments.length)}
+                          title="当前回复结束后执行"
+                        >
+                          排队
+                        </InputGroupButton>
+                      </>
                     )}
                     {mainBusy ? (
                       <InputGroupButton
@@ -1991,7 +2031,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                         className="ml-auto"
                         size="icon-xs"
                         variant="default"
-                        onClick={send}
+                        onClick={() => send()}
                         disabled={(!input.trim() && attachments.length === 0) || sending}
                         title="发送消息"
                         aria-label="发送消息"

@@ -649,6 +649,8 @@ export interface Activity {
   summary: string;
   detail?: string;
   metadata?: {
+    delivery_mode?: "steer" | "queue";
+    inbox_id?: number;
     llm_transition?: LLMTransition;
   };
   source_task_id?: string;

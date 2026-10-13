@@ -233,6 +233,22 @@ function interceptPageQuery(page: number, size: number, filter: InterceptApprova
   return query.toString();
 }
 
+function inboxItemPath(base: string, suffix: string) {
+  const [path, query] = base.split("?");
+  return `${path}/${suffix}${query ? `?${query}` : ""}`;
+}
+
+export type AgentMessageMode = "steer" | "queue";
+export type AgentInboxItem = {
+  id: number;
+  mode: AgentMessageMode;
+  state: "pending" | "running";
+  revision: number;
+  message: string;
+  attachments?: ChatAttachment[];
+};
+export type AgentInboxResponse = { items: AgentInboxItem[] };
+
 export const api = {
   // 后端应用版本号（release 时由 ldflags 注入，默认 "dev"）。
   health: () => get<{ ok: boolean; service: string; version: string }>("/health"),
@@ -826,8 +842,7 @@ export const api = {
   // 渠道是多实例资源（同一类型可配多个机器人、各有过滤规则），因此独立成组，
   // 不塞进扁平的 settings 键值里。
   notifyMeta: () => get<NotificationMeta>(`/notify/meta`),
-  notifyChannels: () =>
-    get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
+  notifyChannels: () => get<{ channels: NotificationChannel[] }>(`/notify/channels`).then((r) => arr(r.channels)),
   notifyCreateChannel: (payload: {
     name: string;
     kind: string;
@@ -878,8 +893,27 @@ export const api = {
       `/chat/mentions?${new URLSearchParams({ kind, q: query, cursor })}`,
       { signal },
     ),
-  chat: (message: string, task?: string, attachments?: ChatAttachment[], seg?: number) =>
-    post<{ reply: string; mode: string }>(`/chat${tq(task)}`, { message, attachments, seg }),
+  chat: (
+    message: string,
+    task?: string,
+    attachments?: ChatAttachment[],
+    seg?: number,
+    mode?: AgentMessageMode,
+    request_id?: string,
+  ) =>
+    post<{ reply?: string; mode: string; id?: number; state?: string }>(`/chat${tq(task)}`, {
+      message,
+      attachments,
+      seg,
+      mode,
+      request_id,
+    }),
+  agentInbox: (base: string) => get<AgentInboxResponse>(base),
+  editAgentInbox: (base: string, id: number, message: string, revision: number, attachments?: ChatAttachment[]) =>
+    patch<AgentInboxResponse>(inboxItemPath(base, String(id)), { message, revision, attachments }),
+  deleteAgentInbox: (base: string, id: number) => del<AgentInboxResponse>(inboxItemPath(base, String(id))),
+  reorderAgentInbox: (base: string, ids: number[], previous: number[]) =>
+    put<AgentInboxResponse>(inboxItemPath(base, "order"), { ids, previous }),
   chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
   // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
   chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {
@@ -1019,22 +1053,43 @@ export const api = {
     post<{ items: { id: number; ok: boolean; error?: string }[] }>("/conversations/delete/batch", { ids }),
   // Incremental tail: steps after `since` (id ASC) — live poll + post-send fetch.
   conversationMessages: (id: number, since = 0) =>
-    get<{ items: Activity[]; cursor: number; running: boolean; tokens?: ConversationTokenTotal }>(`/conversations/${id}/messages?since=${since}`).then(
-      (r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, tokens: r.tokens }),
-    ),
+    get<{ items: Activity[]; cursor: number; running: boolean; tokens?: ConversationTokenTotal }>(
+      `/conversations/${id}/messages?since=${since}`,
+    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, tokens: r.tokens })),
   // Reverse pagination: the latest `limit` steps (before=0) or the page of older
   // steps ending before id `before`. hasMore = still-older steps exist.
   conversationHistory: (id: number, before = 0, limit = 200) => {
     const q = new URLSearchParams({ limit: String(limit) });
     if (before > 0) q.set("before", String(before));
-    return get<{ items: Activity[]; cursor: number; running: boolean; hasMore: boolean; tokens?: ConversationTokenTotal }>(
-      `/conversations/${id}/messages?${q.toString()}`,
-    ).then((r) => ({ items: arr(r.items), cursor: r.cursor ?? 0, running: !!r.running, hasMore: !!r.hasMore, tokens: r.tokens }));
+    return get<{
+      items: Activity[];
+      cursor: number;
+      running: boolean;
+      hasMore: boolean;
+      tokens?: ConversationTokenTotal;
+    }>(`/conversations/${id}/messages?${q.toString()}`).then((r) => ({
+      items: arr(r.items),
+      cursor: r.cursor ?? 0,
+      running: !!r.running,
+      hasMore: !!r.hasMore,
+      tokens: r.tokens,
+    }));
   },
   conversationMsgDetail: (id: number, seq: number) =>
     get<{ detail: string }>(`/conversations/${id}/messages/${seq}`).then((r) => r.detail ?? ""),
-  sendConversationMessage: (id: number, message: string, attachments?: ChatAttachment[]) =>
-    post<{ status: string }>(`/conversations/${id}/messages`, { message, attachments }),
+  sendConversationMessage: (
+    id: number,
+    message: string,
+    attachments?: ChatAttachment[],
+    mode?: AgentMessageMode,
+    request_id?: string,
+  ) =>
+    post<{ status?: string; id?: number; state?: string }>(`/conversations/${id}/messages`, {
+      message,
+      attachments,
+      mode,
+      request_id,
+    }),
   stopConversation: (id: number) => post<{ status: string }>(`/conversations/${id}/stop`, {}),
   saveAgentPrompt: (key: string, template: string, note = "") =>
     put<{ version: number }>(`/agents/${key}/prompt`, { template, note }),

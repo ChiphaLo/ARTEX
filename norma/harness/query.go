@@ -79,6 +79,9 @@ type QueryInput struct {
 
 	// Hooks is optional lifecycle instrumentation. Nil disables it.
 	Hooks HookRunner
+	// PendingMessages drains host-owned human text at safe stream/tool boundaries.
+	// The callback must be concurrency-safe and must not return Queue messages.
+	PendingMessages func(context.Context) []llm.Message
 	// Compactor is optional context-window management. Nil disables it.
 	Compactor Compactor
 	// Recorder, when non-nil, is notified as the conversation grows so a host can
@@ -401,6 +404,7 @@ func (l *loop) run() {
 			return
 		}
 
+		l.injectPendingMessages()
 		// Non-destructive proactive compaction (MicroCompact → AutoCompact).
 		if l.in.Compactor != nil {
 			l.messages = l.in.Compactor.Pre(l.ctx, l.messages, l.lastInputTokens)
@@ -467,6 +471,11 @@ func (l *loop) run() {
 			if l.settling {
 				l.finish(l.settleReason, nil, asst.Text())
 				return
+			}
+			if l.injectPendingMessages() {
+				l.turnCount++
+				l.lastContinue = ContinueNextTurn
+				continue
 			}
 			// Stop hooks: hard terminate, or force continue with injected errors.
 			// stopHookActive prevents an always-blocking hook from looping forever
@@ -761,10 +770,39 @@ func messageHasToolUse(m llm.Message, name string) bool {
 	return false
 }
 
-// streamAndExecute runs one model completion, surfacing text/thinking, and feeds
-// tool_use blocks to the streaming executor as they finish — so tools begin
-// running while the rest of the message is still arriving. It returns the
-// assembled assistant message, the executor, the stop reason, and flags.
+// injectPendingMessages is a host-owned safe-boundary inbox. It never cancels
+// the current stream/tool batch and cannot introduce fabricated tool results.
+func (l *loop) injectPendingMessages() bool {
+	if l.in.PendingMessages == nil || l.ctx.Err() != nil || l.settling {
+		return false
+	}
+	if l.in.MaxTurns > 0 && l.turnCount >= l.in.MaxTurns {
+		return false
+	}
+	if l.in.MaxDuration > 0 && time.Since(l.startTime) >= l.in.MaxDuration {
+		return false
+	}
+	added := false
+	for _, message := range l.in.PendingMessages(l.ctx) {
+		if message.Role != llm.RoleUser || len(message.Content) == 0 {
+			continue
+		}
+		valid := true
+		for _, block := range message.Content {
+			if block.Type != llm.BlockText {
+				valid = false
+			}
+		}
+		if !valid {
+			continue
+		}
+		l.messages = append(l.messages, message)
+		l.record(message, llm.Usage{})
+		added = true
+	}
+	return added
+}
+
 // requestMessages builds the message array for one model request. A Compactor
 // that implements ContextView takes over the projection entirely; otherwise the
 // default working set (post-boundary, unpaired tool blocks dropped) is used.
@@ -776,6 +814,10 @@ func (l *loop) requestMessages() []llm.Message {
 	return llm.MessagesForAPI(l.messages)
 }
 
+// streamAndExecute runs one model completion, surfacing text/thinking, and feeds
+// tool_use blocks to the streaming executor as they finish — so tools begin
+// running while the rest of the message is still arriving. It returns the
+// assembled assistant message, the executor, the stop reason, and flags.
 func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exec *streamExec, stopReason string, err error, consumerStopped, aborted bool) {
 	l.maybeInjectTodoReminder()
 	msgs := l.requestMessages()

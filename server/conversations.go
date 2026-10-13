@@ -383,6 +383,11 @@ func (s *Server) pgStopConversation(w http.ResponseWriter, r *http.Request) {
 	}
 	busyKey := s.convBusyKey(c.ID)
 	s.chatMu.Lock()
+	if err := s.m.pg.CancelAgentSteers(busyKey); err != nil {
+		s.chatMu.Unlock()
+		writeErr(w, 500, err.Error())
+		return
+	}
 	cancel := s.chatCancel[busyKey]
 	s.chatMu.Unlock()
 	if cancel == nil {
@@ -403,6 +408,8 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	}
 	var req struct {
 		Message     string           `json:"message"`
+		Mode        string           `json:"mode,omitempty"`
+		RequestID   string           `json:"request_id,omitempty"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对会话工作目录)
 	}
 	if err := decode(r, &req); err != nil {
@@ -414,8 +421,18 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 400, "消息不能为空")
 		return
 	}
-	agentMessage, ok := s.prepareChatMentionMessage(w, msg)
-	if !ok {
+	agentMessage := ""
+	if d := deliveryFrom(r.Context()); d != nil {
+		agentMessage = d.payload.AgentMessage
+	} else {
+		var ok bool
+		agentMessage, ok = s.prepareChatMentionMessage(w, msg)
+		if !ok {
+			return
+		}
+	}
+	if req.Mode != "" {
+		s.enqueueInbox(w, r, s.convBusyKey(c.ID), 0, c.ID, 0, req.Mode, req.RequestID, msg, agentMessage, req.Attachments)
 		return
 	}
 	// Same resolution as the background runner: honour the agent binding / this
@@ -429,7 +446,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 
 	busyKey := s.convBusyKey(c.ID)
 	s.chatMu.Lock()
-	if s.chatBusy[busyKey] {
+	if s.chatBusy[busyKey] || s.inboxReserved(busyKey, r.Context()) {
 		s.chatMu.Unlock()
 		writeErr(w, 409, "该会话正在处理上一条消息，请稍候")
 		return
@@ -445,6 +462,9 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// so the transcript lazy-loads Detail to show the message untruncated).
 	ua := userActivityWithAttachments(c.AgentKey, msg, req.Attachments)
 	ua.Summary = firstLine(msg, 200)
+	if d := deliveryFrom(r.Context()); d != nil {
+		inboxMetadata(&ua, d.item.Mode, d.item.ID)
+	}
 	if ua.Detail == "" {
 		ua.Detail = msg
 	}
@@ -465,7 +485,12 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
-	s.runConversation(c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey, msg)
+	ctx, cancel := s.conversationRunContext(c.ID, busyKey, r.Context())
+	ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: msg})
+	if d := deliveryFrom(r.Context()); d != nil {
+		ctx = context.WithValue(ctx, inboxDeliveryKey{}, d)
+	}
+	go s.runConversationTurn(ctx, cancel, c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
 
@@ -494,10 +519,14 @@ func (s *Server) runConversationSync(c *db.Conversation, msg, busyKey string) {
 
 // Register cancellation before returning 202, so an immediate stop/delete cannot
 // miss a background goroutine which has not started yet.
-func (s *Server) conversationRunContext(id int64, busyKey string) (context.Context, context.CancelCauseFunc) {
+func (s *Server) conversationRunContext(id int64, busyKey string, deliveryCtx ...context.Context) (context.Context, context.CancelCauseFunc) {
 	// Per-run cancellable context so a manual stop (pgStopConversation) can abort
 	// just this session. Registered under chatMu so the stop handler can find it.
-	ctx, cancel := context.WithCancelCause(intercept.WithConvID(s.ctx, id))
+	parent := s.ctx
+	if len(deliveryCtx) == 1 && deliveryFrom(deliveryCtx[0]) != nil {
+		parent = deliveryCtx[0]
+	}
+	ctx, cancel := context.WithCancelCause(intercept.WithConvID(parent, id))
 	s.chatMu.Lock()
 	s.chatCancel[busyKey] = cancel
 	s.chatMu.Unlock()
@@ -505,12 +534,15 @@ func (s *Server) conversationRunContext(id int64, busyKey string) (context.Conte
 }
 
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
+	runErr := fmt.Errorf("conversation turn did not start")
 	defer func() {
+		finishInboxRun(ctx, runErr)
 		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
 		delete(s.chatBusy, busyKey)
 		delete(s.chatCancel, busyKey)
 		s.chatMu.Unlock()
+		s.wakeInbox()
 	}()
 	// Only the first turn executes a historical retest. Follow-up conversation
 	// turns may explain the sealed result; the result tool refuses to overwrite it.
@@ -554,6 +586,7 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 	ca := s.resolveChatAgent(c)
 	if ca == nil {
 		finishReason = s.chatUnavailableReason()
+		runErr = fmt.Errorf("%s", finishReason)
 		return
 	}
 	pg := s.m.pg
@@ -569,16 +602,19 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 			log.Printf("[conv %d] append activity failed: %v", c.ID, err)
 		}
 	}
+	ctx = s.attachLiveInbox(ctx, busyKey, c.AgentKey, filepath.Join(s.m.dir, "sessions", busyKey), emit)
 	// On a manual stop ctx is cancelled; Chat already emits a clean "已手动停止"
 	// step, so skip the raw-error entry — only surface genuine failures.
 	if _, err := ca.Chat(ctx, c.AgentKey, sessionID, msg, maxTurns, maxDuration, webSearch, emit); err != nil {
 		finishReason = err.Error()
+		runErr = err
 		if ctx.Err() == nil {
 			_, _ = pg.AppendConvActivity(c.ID, db.Activity{Worker: c.AgentKey, Kind: "text", IsError: true,
 				Summary: "（出错：" + err.Error() + "）", Detail: err.Error()})
 		}
 	} else {
 		finishStatus, finishReason = "completed", ""
+		runErr = nil
 	}
 	_ = pg.TouchConversation(c.ID)
 }

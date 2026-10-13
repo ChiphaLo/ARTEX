@@ -624,7 +624,10 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
             {text}
           </div>
         )}
-        <ActivityTime ts={step.ts} />
+        <div className="flex items-center gap-2">
+          {step.metadata?.delivery_mode && <span className="text-[10px] text-muted-foreground">{step.metadata.delivery_mode === "steer" ? "Steer" : "排队消息"}</span>}
+          <ActivityTime ts={step.ts} />
+        </div>
       </div>
       <div className="mt-0.5 flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/10">
         <Icon className="size-3.5 text-primary" />

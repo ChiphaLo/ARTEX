@@ -1001,6 +1001,7 @@ CREATE TABLE IF NOT EXISTS conversation_activities (
     cache_write_tokens INTEGER,
     created_at         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE conversation_activities ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{}';
 CREATE INDEX IF NOT EXISTS idx_conv_act ON conversation_activities(conversation_id, id);
 CREATE INDEX IF NOT EXISTS idx_conv_act_tool_call ON conversation_activities(conversation_id, tool_use_id, id)
   WHERE kind IN ('tool_use', 'tool_result');
@@ -1402,3 +1403,23 @@ CREATE INDEX IF NOT EXISTS idx_notification_deliveries_batch
     ON notification_deliveries(batch_id) WHERE batch_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_notification_deliveries_channel
     ON notification_deliveries(channel_id, id DESC);
+
+CREATE TABLE IF NOT EXISTS agent_inbox (
+ id BIGSERIAL PRIMARY KEY,
+ scope_key TEXT NOT NULL,
+ task_id BIGINT REFERENCES tasks(id) ON DELETE CASCADE,
+ conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,
+ main_seg INTEGER NOT NULL DEFAULT 0 CHECK (main_seg >= 0),
+ request_id TEXT NOT NULL,
+ mode TEXT NOT NULL CHECK (mode IN ('steer','queue')),
+ state TEXT NOT NULL DEFAULT 'pending' CHECK (state IN ('pending','running','delivered','cancelled','failed','interrupted')),
+ payload JSONB NOT NULL,
+ original_payload JSONB NOT NULL,
+ position BIGINT NOT NULL,
+ revision INTEGER NOT NULL DEFAULT 1,
+ created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ finished_at TIMESTAMPTZ,
+ UNIQUE(scope_key,request_id),
+ CHECK ((task_id IS NOT NULL AND conversation_id IS NULL) OR (task_id IS NULL AND conversation_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_inbox_pending ON agent_inbox(scope_key,id) WHERE state='pending';

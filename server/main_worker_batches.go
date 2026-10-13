@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"path/filepath"
 	"strconv"
 	"time"
 
@@ -60,6 +61,9 @@ func (s *Server) pumpMainWorkerBatches() {
 		if !ok || t.ExpID != b.ExplorationID || s.engine.IsDeleting(id) || !s.taskRuntimeAvailable(t, "mainagent") {
 			continue
 		}
+		if pending, err := s.m.pg.HasTaskInbox(b.TaskID); err != nil || pending {
+			continue
+		}
 		// Obtain bounded output before admission; final CAS rechecks worker states.
 		results, total, err := s.m.pg.MainWorkerBatchResults(b)
 		if err != nil {
@@ -69,8 +73,13 @@ func (s *Server) pumpMainWorkerBatches() {
 		message := mainWorkerBatchMessage(b, results, total)
 		ma := s.agentsForTask(t).main
 		s.chatMu.Lock()
+		pending, inboxErr := s.m.pg.HasTaskInbox(b.TaskID)
+		if inboxErr != nil || pending {
+			s.chatMu.Unlock()
+			continue
+		}
 		life := t.lifecycleSnapshot()
-		if s.ctx.Err() != nil || s.chatBusy[id] || s.engine.IsDeleting(id) || life.Paused || life.Queued || s.engine.IsPaused(id) {
+		if s.ctx.Err() != nil || s.chatBusy[id] || s.inboxDispatching[id] || s.engine.IsDeleting(id) || life.Paused || life.Queued || s.engine.IsPaused(id) {
 			s.chatMu.Unlock()
 			continue
 		}
@@ -97,6 +106,7 @@ func (s *Server) pumpMainWorkerBatches() {
 			s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", MainSeg: &seg,
 				Summary: fmt.Sprintf("【系统】本轮 %d 个 Worker 已全部结束，自动汇总结果（批次 #%d）。", total, b.ID), Metadata: metadata})
 			emit := func(r db.Activity) { r.MainSeg = &seg; s.engine.emitActivity(t, r) }
+			ctx = s.attachLiveInbox(ctx, mainInboxScope(id, seg), "mainagent", filepath.Join(s.m.dir, "tasks", id), emit)
 			s.engine.BeginLLMCall(id)
 			_, err := ma.Chat(ctx, b.TaskID, b.MainSeg, s.m.Assets(), t.Store, t.Goal, message, emit, t.Notify, nil, t.NotifyGoal, t.NotifyHint)
 			s.engine.EndLLMCall(id)

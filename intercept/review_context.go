@@ -31,15 +31,30 @@ type ReviewInput struct {
 
 type reviewContextKey struct{}
 type reviewEnvironment struct {
-	workingDir string
-	background ReviewBackground
+	workingDir     string
+	background     ReviewBackground
+	backgroundFunc func() ReviewBackground
 }
 
 // WithReviewContext explicitly binds the permitted background for one run. Never
 // fall back to the raw turn transcript: it may contain the full scheduler prompt.
 // This is application wiring, not a model-callable tool.
 func WithReviewContext(ctx context.Context, workingDir string, background ReviewBackground) context.Context {
-	return context.WithValue(ctx, reviewContextKey{}, reviewEnvironment{workingDir, background})
+	return context.WithValue(ctx, reviewContextKey{}, reviewEnvironment{workingDir: workingDir, background: background})
+}
+
+// Application-owned human delivery only, never generated Worker summaries.
+func WithReviewBackgroundFunc(ctx context.Context, fn func() ReviewBackground) context.Context {
+	env, _ := ctx.Value(reviewContextKey{}).(reviewEnvironment)
+	env.backgroundFunc = fn
+	return context.WithValue(ctx, reviewContextKey{}, env)
+}
+func CurrentReviewBackground(ctx context.Context) ReviewBackground {
+	env, _ := ctx.Value(reviewContextKey{}).(reviewEnvironment)
+	if env.backgroundFunc != nil {
+		return env.backgroundFunc()
+	}
+	return env.background
 }
 
 // WithReviewWorkingDirectory preserves only explicitly selected background.
@@ -58,7 +73,7 @@ func BuildReviewInput(ctx context.Context, tool string, arguments json.RawMessag
 	in := ReviewInput{Version: 4, Tool: tool, Arguments: append(json.RawMessage(nil), arguments...)}
 	if env, ok := ctx.Value(reviewContextKey{}).(reviewEnvironment); ok {
 		in.WorkingDir = env.workingDir
-		background := env.background
+		background := CurrentReviewBackground(ctx)
 		if background.Source == BackgroundUserMessage && strings.TrimSpace(background.Text) != "" {
 			var cut bool
 			background.Text, cut = bounded(background.Text, reviewTextLimit)

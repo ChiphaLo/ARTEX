@@ -72,8 +72,10 @@ type Server struct {
 	// convBusyKey), so a manual stop can abort JUST that session's agent run. Set/
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
-	chatCancel    map[string]context.CancelCauseFunc
-	mainBatchWake chan struct{} // independent of planner goal/notify lifecycle
+	chatCancel       map[string]context.CancelCauseFunc
+	mainBatchWake    chan struct{} // independent of planner goal/notify lifecycle
+	inboxWake        chan struct{}
+	inboxDispatching map[string]bool // reservations under chatMu
 
 	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
 	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
@@ -151,7 +153,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
-		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), mainBatchWake: make(chan struct{}, 1)}
+		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), mainBatchWake: make(chan struct{}, 1), inboxWake: make(chan struct{}, 1), inboxDispatching: map[string]bool{}}
 	s.engine.onIntentSettled = s.wakeMainWorkerBatches
 	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
@@ -260,6 +262,10 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		if err := m.pg.RecoverMainWorkerBatches(); err != nil {
 			log.Printf("[main-worker-batch] recovery: %v", err)
 		}
+		if err := m.pg.RecoverAgentInbox(); err != nil {
+			log.Printf("[agent-inbox] recovery: %v", err)
+		}
+		go s.runAgentInbox()
 		go s.runMainWorkerBatches()
 	}
 	go s.reconcileConcurrency()
@@ -825,6 +831,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
 	mux.HandleFunc("GET /api/tasks/{id}/chat/status", s.taskChatStatus)
 	mux.HandleFunc("POST /api/tasks/{id}/chat/stop", s.stopChat)
+	mux.HandleFunc("GET /api/tasks/{id}/chat/inbox", s.agentInboxAPI)
+	mux.HandleFunc("PATCH /api/tasks/{id}/chat/inbox/{mid}", s.agentInboxAPI)
+	mux.HandleFunc("DELETE /api/tasks/{id}/chat/inbox/{mid}", s.agentInboxAPI)
+	mux.HandleFunc("PUT /api/tasks/{id}/chat/inbox/order", s.agentInboxAPI)
 
 	// --- 管理后台 API (PostgreSQL 数据源; 新版数据库与管理后台方案) ---
 	mux.HandleFunc("DELETE /api/tasks/{id}", s.pgDeleteTask)
@@ -839,6 +849,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.pgConversationMessages)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", s.pgSendConversationMessage)
 	mux.HandleFunc("POST /api/conversations/{id}/stop", s.pgStopConversation)
+	mux.HandleFunc("GET /api/conversations/{id}/inbox", s.agentInboxAPI)
+	mux.HandleFunc("PATCH /api/conversations/{id}/inbox/{mid}", s.agentInboxAPI)
+	mux.HandleFunc("DELETE /api/conversations/{id}/inbox/{mid}", s.agentInboxAPI)
+	mux.HandleFunc("PUT /api/conversations/{id}/inbox/order", s.agentInboxAPI)
 	mux.HandleFunc("GET /api/conversations/{id}/messages/{seq}", s.pgConversationMsgDetail)
 
 	mux.HandleFunc("GET /api/agents", s.pgListAgents)
@@ -3679,6 +3693,8 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	// worker 的暂停,暂停中仍可继续对话(暂停只终止其正在进行的那一轮,见 control())。
 	var req struct {
 		Message     string           `json:"message"`
+		Mode        string           `json:"mode,omitempty"`
+		RequestID   string           `json:"request_id,omitempty"`
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
 		Seg         *int             `json:"seg,omitempty"`         // 目标主会话分段;缺省=最新段
 	}
@@ -3686,8 +3702,29 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, err.Error())
 		return
 	}
-	agentMessage, ok := s.prepareChatMentionMessage(w, req.Message)
-	if !ok {
+	mainSeg := 0
+	if req.Seg != nil && *req.Seg >= 0 {
+		mainSeg = *req.Seg
+	} else {
+		if req.Mode != "" && req.Seg != nil {
+			writeErr(w, 400, "invalid seg")
+			return
+		}
+		mainSeg, _ = t.Store.CurrentMainSeg()
+	}
+	agentMessage := ""
+	if d := deliveryFrom(r.Context()); d != nil {
+		agentMessage = d.payload.AgentMessage
+	} else {
+		var ok bool
+		agentMessage, ok = s.prepareChatMentionMessage(w, req.Message)
+		if !ok {
+			return
+		}
+	}
+	if req.Mode != "" {
+		taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+		s.enqueueInbox(w, r, mainInboxScope(t.ID, mainSeg), taskID, 0, mainSeg, req.Mode, req.RequestID, req.Message, agentMessage, req.Attachments)
 		return
 	}
 	// Admission is serialized with deletion's chat cancellation. Mark every chat
@@ -3699,12 +3736,24 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "任务正在删除，无法发送新消息")
 		return
 	}
-	if s.chatBusy[t.ID] {
+	if s.chatBusy[t.ID] || s.inboxReserved(t.ID, r.Context()) {
 		s.chatMu.Unlock()
 		writeErr(w, 409, "主 Agent 正在处理上一条消息，请稍候")
 		return
 	}
-	ctx, cancel := context.WithCancelCause(s.ctx)
+	parent := s.ctx
+	if deliveryFrom(r.Context()) != nil {
+		parent = r.Context()
+		if parent.Err() != nil {
+			s.chatMu.Unlock()
+			writeErr(w, 409, "待处理回合已取消")
+			return
+		}
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	if d := deliveryFrom(r.Context()); d != nil {
+		ctx = context.WithValue(ctx, inboxDeliveryKey{}, d)
+	}
 	ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: req.Message})
 	s.chatBusy[t.ID] = true
 	s.chatCancel[t.ID] = cancel
@@ -3714,12 +3763,6 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	// segment is interactive, like the top-level chat conversations). Stamp every
 	// mainagent row with it so this turn's transcript + activity land in that segment.
 	// Missing seg (older clients) falls back to the newest segment.
-	mainSeg := 0
-	if req.Seg != nil && *req.Seg >= 0 {
-		mainSeg = *req.Seg
-	} else {
-		mainSeg, _ = t.Store.CurrentMainSeg()
-	}
 	segPtr := &mainSeg
 
 	// Persist + broadcast the human turn so the 主 Agent 编排会话 survives page
@@ -3729,6 +3772,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	// renders attachment cards.
 	humanTurn := userActivityWithAttachments("mainagent", req.Message, req.Attachments)
 	humanTurn.MainSeg = segPtr
+	if d := deliveryFrom(ctx); d != nil {
+		inboxMetadata(&humanTurn, d.item.Mode, d.item.ID)
+	}
 	s.engine.emitActivity(t, humanTurn)
 	var ma *agent.MainAgent
 	if s.taskRuntimeAvailable(t, "mainagent") {
@@ -3741,11 +3787,14 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		// steps + final answer stream back live via SSE (worker="mainagent"), so the
 		// handler returns immediately and the browser never needs to hold the request.
 		go func() {
+			var runErr error
 			defer func() {
+				finishInboxRun(ctx, runErr)
 				s.finishTaskChat(t.ID, cancel)
 			}()
 			batchID, batchErr := t.Store.BeginMainWorkerBatch(mainSeg)
 			if batchErr != nil {
+				runErr = batchErr
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, MainSeg: segPtr, Summary: "（无法创建 Worker 回传批次，本轮未启动）"})
 				return
 			}
@@ -3764,8 +3813,10 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
+			ctx = s.attachLiveInbox(ctx, mainInboxScope(t.ID, mainSeg), "mainagent", taskDir, emit)
 			s.engine.BeginLLMCall(t.ID)
 			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)
+			runErr = err
 			s.engine.EndLLMCall(t.ID)
 			if err != nil && ctx.Err() == nil {
 				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: "（主 Agent 出错：" + err.Error() + "）", MainSeg: segPtr})
@@ -3776,6 +3827,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	reply := s.fallbackChat(t, req.Message)
 	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply, MainSeg: segPtr})
+	finishInboxRun(ctx, nil)
 	s.finishTaskChat(t.ID, cancel)
 	writeJSON(w, 200, map[string]any{"reply": reply, "mode": "rule"})
 }
@@ -3796,6 +3848,7 @@ func (s *Server) finishTaskChat(taskID string, cancel context.CancelCauseFunc) {
 	delete(s.chatBusy, taskID)
 	delete(s.chatCancel, taskID)
 	s.chatMu.Unlock()
+	s.wakeInbox()
 	s.wakeMainWorkerBatches()
 }
 
@@ -3821,6 +3874,14 @@ func (s *Server) stopChat(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.PathValue("id"))
 	if t == nil {
 		writeErr(w, 404, "task not found")
+		return
+	}
+	taskID, _ := strconv.ParseInt(t.ID, 10, 64)
+	s.chatMu.Lock()
+	err := s.m.pg.CancelTaskSteers(taskID)
+	s.chatMu.Unlock()
+	if err != nil {
+		writeErr(w, 500, err.Error())
 		return
 	}
 	// A manual stop also revokes queued automatic reports; workers keep running.

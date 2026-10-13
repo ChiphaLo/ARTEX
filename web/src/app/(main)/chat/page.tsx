@@ -22,10 +22,11 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 
+import { AgentInbox, useInboxRequestID } from "@/components/agent-inbox";
+import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
-import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { Transcript } from "@/components/transcript";
 import {
   AlertDialog,
@@ -54,6 +55,7 @@ import { Select, SelectContent, SelectGroup, SelectItem, SelectTrigger, SelectVa
 import { Spinner } from "@/components/ui/spinner";
 import { useSideQuestions } from "@/hooks/use-side-questions";
 import { mergeActivities } from "@/lib/activity-merge";
+import type { AgentMessageMode } from "@/lib/api";
 import { api } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
 import { getLocalStorageValue, setLocalStorageValue } from "@/lib/local-storage.client";
@@ -159,6 +161,8 @@ function Composer({
   onRemoveAttachment,
   uploading,
   allowBtw,
+  onSteer,
+  onQueue,
 }: {
   value: string;
   onChange: (v: string) => void;
@@ -175,6 +179,8 @@ function Composer({
   onRemoveAttachment?: (path: string) => void;
   uploading?: boolean;
   allowBtw?: boolean;
+  onSteer?: () => void;
+  onQueue?: () => void;
 }) {
   const fileInputRef = React.useRef<HTMLInputElement>(null);
   const atts = attachments ?? [];
@@ -252,6 +258,28 @@ function Composer({
         {running && allowBtw && isBtwCommand(value) && (
           <Button size="icon" onClick={onSend} aria-label="发送旁路问题" title="发送旁路问题">
             <ArrowUpIcon />
+          </Button>
+        )}
+        {onSteer && !isBtwCommand(value) && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onSteer}
+            disabled={disabled || uploading || (!value.trim() && !atts.length)}
+            title="当前工具批次完成后接收，不打断运行"
+          >
+            Steer
+          </Button>
+        )}
+        {onQueue && !isBtwCommand(value) && (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={onQueue}
+            disabled={disabled || uploading || (!value.trim() && !atts.length)}
+            title="当前回复结束后执行"
+          >
+            排队
           </Button>
         )}
         {running ? (
@@ -500,6 +528,8 @@ function ChatView({
   const [running, setRunning] = React.useState(false);
   const [input, setInput] = React.useState(initial?.input ?? "");
   const [sending, setSending] = React.useState(false);
+  const inboxRequestID = useInboxRequestID();
+  const [inboxRefresh, setInboxRefresh] = React.useState(0);
   const [stopping, setStopping] = React.useState(false);
   // 方式1 文件上传:已上传的附件(落到 sessions/conv-<id>/uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>(initial?.attachments ?? []);
@@ -611,14 +641,23 @@ function ChatView({
     };
   }, [running, conv.id, onTitleMaybeChanged]);
 
-  const loadFocusPage = React.useCallback((before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE), [conv.id]);
+  const loadFocusPage = React.useCallback(
+    (before: number) => api.conversationHistory(conv.id, before, HISTORY_PAGE),
+    [conv.id],
+  );
   const mergeFocusPage = React.useCallback((page: { items: Activity[]; hasMore: boolean }) => {
     setMessages((prev) => mergeActivities(page.items, prev));
     earliestRef.current = page.items[0]?.seq ?? earliestRef.current;
     hasMoreRef.current = page.hasMore;
     setHasMore(page.hasMore);
   }, []);
-  const focusHistory = useApprovalHistory(approvalFocus.state?.source, historyLoaded, messages, loadFocusPage, mergeFocusPage);
+  const focusHistory = useApprovalHistory(
+    approvalFocus.state?.source,
+    historyLoaded,
+    messages,
+    loadFocusPage,
+    mergeFocusPage,
+  );
 
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
@@ -731,19 +770,25 @@ function ChatView({
     }
   }
 
-  async function send() {
+  async function send(mode: AgentMessageMode = "queue") {
     const msg = input.trim();
     const atts = attachments;
     if (side.handleCommand(msg, () => setInput(""))) return;
-    if ((!msg && atts.length === 0) || sending || running) return;
+    if ((!msg && atts.length === 0) || sending || uploading) return;
+    if ([...msg].length > 4000) {
+      toast.error("消息最多 4000 字");
+      return;
+    }
+    const requestID = inboxRequestID.getID({ scope: conv.id, mode, message: msg, attachments: atts });
     setSending(true);
     setInput("");
     setAttachments([]);
     try {
-      await api.sendConversationMessage(conv.id, msg, atts.length ? atts : undefined);
+      await api.sendConversationMessage(conv.id, msg, atts.length ? atts : undefined, mode, requestID);
+      inboxRequestID.clear();
+      setInboxRefresh((v) => v + 1);
       // The live loop pulls the persisted human turn immediately. Sharing that
       // fetch avoids racing a separate post-send request against the poller.
-      setRunning(true);
     } catch (e) {
       toast.error("发送失败：" + (e as Error).message);
       setInput(msg); // restore so the user doesn't lose their text
@@ -813,19 +858,28 @@ function ChatView({
               {hasMore && (
                 <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
               )}
-              <Transcript activity={messages} live={running} chat fetchDetail={fetchDetail} focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined} />
+              <Transcript
+                activity={messages}
+                live={running}
+                chat
+                fetchDetail={fetchDetail}
+                focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
+              />
             </>
           )}
         </div>
       </ScrollArea>
 
+      <AgentInbox base={`/conversations/${conv.id}/inbox`} refreshKey={inboxRefresh} />
       <Composer
         value={input}
         onChange={setInput}
-        onSend={send}
-        disabled={running || sending}
+        onSend={() => void send()}
+        onSteer={() => void send("steer")}
+        onQueue={() => void send("queue")}
+        disabled={sending || uploading}
         allowBtw
-        placeholder={running ? "Agent 正在回复，可输入 /btw 提问…" : "输入消息，@ 引用记录，Enter 发送"}
+        placeholder={running ? "运行中：Enter 排队，Steer 不打断；/btw 旁路提问…" : "输入消息，@ 引用记录，Enter 发送"}
         running={running}
         onStop={stop}
         stopDisabled={stopping}
@@ -1059,15 +1113,18 @@ export default function ChatPage() {
   const [selectedId, setSelectedId] = React.useState<number | null>(null);
   const [sourceRequested, setSourceRequested] = React.useState(false);
   const [convsLoaded, setConvsLoaded] = React.useState(false);
-  const selectConversation = React.useCallback((id: number | null) => {
-    if (id !== selectedId) {
-      const url = new URL(window.location.href);
-      url.searchParams.delete("approval");
-      setSourceRequested(false);
-      window.history.replaceState(null, "", url);
-    }
-    setSelectedId(id);
-  }, [selectedId]);
+  const selectConversation = React.useCallback(
+    (id: number | null) => {
+      if (id !== selectedId) {
+        const url = new URL(window.location.href);
+        url.searchParams.delete("approval");
+        setSourceRequested(false);
+        window.history.replaceState(null, "", url);
+      }
+      setSelectedId(id);
+    },
+    [selectedId],
+  );
 
   const [renamingId, setRenamingId] = React.useState<number | null>(null);
   const [renameText, setRenameText] = React.useState("");
@@ -1094,7 +1151,10 @@ export default function ChatPage() {
     const seq = ++conversationListSeq.current;
     try {
       const items = await api.conversations();
-      if (seq === conversationListSeq.current) { setConvs(items); setConvsLoaded(true); }
+      if (seq === conversationListSeq.current) {
+        setConvs(items);
+        setConvsLoaded(true);
+      }
     } catch {
       // Preserve the selected transcript and list on a transient poll failure.
     }

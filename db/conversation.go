@@ -236,11 +236,14 @@ func (d *DB) DeleteConversations(ids []int64) ([]int64, error) {
 // keyed by conversation_id. Reuses the Activity struct (NodeID is ignored here).
 func (d *DB) AppendConvActivity(convID int64, a Activity) (int64, error) {
 	var id int64
+	if len(a.Metadata) == 0 {
+		a.Metadata = []byte(`{}`)
+	}
 	err := d.QueryRow(`
-INSERT INTO conversation_activities(conversation_id, worker, kind, tool, tool_use_id, is_error, summary, detail, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens)
-VALUES ($1,NULLIF($2,''),NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12)
+INSERT INTO conversation_activities(conversation_id, worker, kind, tool, tool_use_id, is_error, summary, detail, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, metadata)
+VALUES ($1,NULLIF($2,''),NULLIF($3,''),NULLIF($4,''),NULLIF($5,''),$6,NULLIF($7,''),NULLIF($8,''),$9,$10,$11,$12,$13)
 RETURNING id`, convID, utf8Clean(a.Worker), utf8Clean(a.Kind), utf8Clean(a.Tool), utf8Clean(a.ToolUseID), a.IsError,
-		utf8Clean(a.Summary), utf8Clean(a.Detail), a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens).Scan(&id)
+		utf8Clean(a.Summary), utf8Clean(a.Detail), a.InputTokens, a.OutputTokens, a.CacheReadTokens, a.CacheWriteTokens, string(a.Metadata)).Scan(&id)
 	return id, err
 }
 
@@ -250,7 +253,7 @@ func (d *DB) ConvActivityList(convID, sinceID int64, limit int) ([]Activity, int
 	if limit <= 0 {
 		limit = 500
 	}
-	const cols = `id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	const cols = `id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, metadata`
 	rows, err := d.Query(`SELECT `+cols+`
 FROM conversation_activities WHERE conversation_id=$1 AND id>$2 ORDER BY id LIMIT $3`, convID, sinceID, limit)
 	if err != nil {
@@ -262,7 +265,7 @@ FROM conversation_activities WHERE conversation_id=$1 AND id>$2 ORDER BY id LIMI
 	for rows.Next() {
 		var a Activity
 		if err := rows.Scan(&a.ID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.CreatedAt,
-			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens, &a.Metadata); err != nil {
 			return nil, sinceID, err
 		}
 		if a.ID > cursor {
@@ -282,7 +285,7 @@ func (d *DB) ConvActivityPage(convID, before int64, limit int) ([]Activity, bool
 	if limit <= 0 {
 		limit = 200
 	}
-	const cols = `id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens`
+	const cols = `id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), COALESCE(tool_use_id,''), is_error, COALESCE(summary,''), created_at, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, metadata`
 	// fetch one extra row to detect whether older history remains before this window.
 	rows, err := d.Query(`SELECT `+cols+`
 FROM conversation_activities
@@ -296,7 +299,7 @@ ORDER BY id DESC LIMIT $3`, convID, before, limit+1)
 	for rows.Next() {
 		var a Activity
 		if err := rows.Scan(&a.ID, &a.Worker, &a.Kind, &a.Tool, &a.ToolUseID, &a.IsError, &a.Summary, &a.CreatedAt,
-			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens); err != nil {
+			&a.InputTokens, &a.OutputTokens, &a.CacheReadTokens, &a.CacheWriteTokens, &a.Metadata); err != nil {
 			return nil, false, err
 		}
 		desc = append(desc, a)
