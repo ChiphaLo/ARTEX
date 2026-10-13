@@ -42,7 +42,7 @@ func AugmentTools(ctx context.Context, agentKey string, base []actool.CoreTool) 
 		cleanup = func() {}
 		out     = base
 	)
-	if ToolAugment != nil {
+	if ToolAugment != nil && !(agentKey == "mainagent" && mainWorkerCompletion(ctx)) {
 		var extra []actool.CoreTool
 		var cl func()
 		extra, def, cl = ToolAugment(ctx, agentKey)

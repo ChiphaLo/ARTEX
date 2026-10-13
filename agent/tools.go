@@ -51,12 +51,13 @@ func compactIntents(ns []*db.Node, parentsOf, yieldsOf map[int64][]int64) []map[
 // ToolSet exposes the PG-backed dual graph (asset + exploration) to an LLM agent.
 // One ToolSet is created per planner/worker run; per-run signals live here.
 type ToolSet struct {
-	findingRecorder FindingRecorder
-	as              *db.AssetStore   // asset store (optional; nil = asset tools not available)
-	cs              *db.CompanyStore // company store (optional)
-	ts              *db.ExplorationStore
-	worker          string
-	taskID          int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	findingRecorder   FindingRecorder
+	as                *db.AssetStore   // asset store (optional; nil = asset tools not available)
+	cs                *db.CompanyStore // company store (optional)
+	ts                *db.ExplorationStore
+	worker            string
+	taskID            int64 // PG tasks.id; 0 when unknown (tests / orchestrator cross-task reads)
+	mainWorkerBatchID int64 // main turn's direct dispatch batch; zero for planner/worker
 	// coverageDisabled mirrors tasks.coverage_enabled=false. Stored inverted so the
 	// zero value (all existing ToolSet constructions) means ENABLED — matching the
 	// DB default (true). When true: graphOverviewData drops the coverage block, the
@@ -1065,6 +1066,9 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 		}
 	}
 	payload := map[string]any{"summary": it.Summary}
+	if t.mainWorkerBatchID > 0 {
+		payload["main_batch_id"] = t.mainWorkerBatchID
+	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
 	}

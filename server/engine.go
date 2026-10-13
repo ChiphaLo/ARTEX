@@ -150,7 +150,8 @@ type Engine struct {
 	resolveAuthoritative bool
 	// readiness reports whether a global LLM provider is configured — the signal behind
 	// Ready()/the llm_configured indicator. Wired once at startup; nil → not ready.
-	readiness func() bool
+	readiness       func() bool
+	onIntentSettled func() // lightweight server wake; does not depend on planner goals
 }
 
 type taskRuntime struct {
@@ -980,6 +981,11 @@ func (e *Engine) runWorkerStep(ctx context.Context, t *Task, name string, worker
 // must already hold one task-operation admission for the whole sequence so a delete
 // cannot observe quiescence between the LLM return and the final DB writes.
 func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *agent.Worker, intent *db.Node, requestID, message string) bool {
+	defer func() {
+		if e.onIntentSettled != nil {
+			e.onIntentSettled()
+		}
+	}()
 	hasChatMessage := message != ""
 	e.stampFirstRun(t) // 首次真正执行 → 盖 first_run_at + 算 deadline(仅带 timeout 的任务)
 	e.touch(t.ID)

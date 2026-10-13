@@ -6,6 +6,7 @@
 
 ### 新增的功能
 
+- **主 Agent 的 Worker 批次自动回传**：同轮直接下发的多个意图全部结束后，独立于 Planner/goal 状态自动在原主会话启动一次只读汇总；新增 PG 持久化批次、事件唤醒、串行排队、终态/停止/重启处理。主 Agent 不再依赖 sleep 轮询，原 Planner 和 Worker 的事件调度保持不变。
 - **可选 Kali Linux MCP Gateway**：独立 Bridge 容器、默认关闭/不公布端口/Burp 需明确 EULA 接受；新增环境配置、幂等注册与异步重试发现，沿用 Skill 与延迟工具加载，默认不授予任何 Agent。
 - **MCP 安全连接配置**：运行时 env/file Secret 引用与每连接 CA，扩展 Streamable HTTP 分页、初始化协商、错误脱敏和会话关闭；Kali 强制验证 HTTPS，调用复用权限和工具审计。新增隔离 Docker 验收脚本及单元测试。
 - **Kali 原生部署支持**：提供恢复上游镜像 ENV 的原生 Gateway launcher 与 Windows + WSL、Linux 原生部署文档；三条隔离集成路径已验收，不替换既有生产部署，不设置开机自启。

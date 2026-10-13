@@ -72,7 +72,8 @@ type Server struct {
 	// convBusyKey), so a manual stop can abort JUST that session's agent run. Set/
 	// cleared alongside chatBusy under chatMu. Aborting a run does NOT touch the P3
 	// trigger queue — the drain goroutine simply proceeds to the next queued fire.
-	chatCancel map[string]context.CancelCauseFunc
+	chatCancel    map[string]context.CancelCauseFunc
+	mainBatchWake chan struct{} // independent of planner goal/notify lifecycle
 
 	// triggerQ buffers P3 trigger fires PER AGENT. A per-agent "pump" launches runs up
 	// to a concurrency limit derived from the agent's策略: serial → limit 1 (+ optional
@@ -150,7 +151,8 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		triggerActive: map[string]int{}, triggerCfg: map[string]triggerBehavior{},
 		profChatAgents: map[int64]*agent.ChatAgent{},
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
-		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1)}
+		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), mainBatchWake: make(chan struct{}, 1)}
+	s.engine.onIntentSettled = s.wakeMainWorkerBatches
 	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
@@ -254,6 +256,12 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		log.Printf("[engine] no LLM provider configured — engine idle until set via /api/llm or env")
 	}
 	s.restoreTaskRuntimes()
+	if m.pg != nil {
+		if err := m.pg.RecoverMainWorkerBatches(); err != nil {
+			log.Printf("[main-worker-batch] recovery: %v", err)
+		}
+		go s.runMainWorkerBatches()
+	}
 	go s.reconcileConcurrency()
 	s.startTaskArchiveWorker()
 	s.wireInterceptReviewer() // LLM 兜底审批:未命中拦截规则的命令交给模型判定
@@ -3736,6 +3744,13 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			defer func() {
 				s.finishTaskChat(t.ID, cancel)
 			}()
+			batchID, batchErr := t.Store.BeginMainWorkerBatch(mainSeg)
+			if batchErr != nil {
+				s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", IsError: true, MainSeg: segPtr, Summary: "（无法创建 Worker 回传批次，本轮未启动）"})
+				return
+			}
+			ctx = agent.WithMainWorkerBatch(ctx, batchID)
+			defer func() { s.sealMainWorkerBatch(t, batchID, ctx) }()
 			// emit every step (thinking/tool_use/tool_result/text/result) so the main
 			// agent session shows its work live, like worker/planner. The final answer
 			// is the captured "result" step — no separate reply emit (would duplicate).
@@ -3781,6 +3796,7 @@ func (s *Server) finishTaskChat(taskID string, cancel context.CancelCauseFunc) {
 	delete(s.chatBusy, taskID)
 	delete(s.chatCancel, taskID)
 	s.chatMu.Unlock()
+	s.wakeMainWorkerBatches()
 }
 
 // taskChatStatus reports the authoritative state of the task's main-agent turn.
@@ -3805,6 +3821,11 @@ func (s *Server) stopChat(w http.ResponseWriter, r *http.Request) {
 	t := s.m.ResolveTask(r.PathValue("id"))
 	if t == nil {
 		writeErr(w, 404, "task not found")
+		return
+	}
+	// A manual stop also revokes queued automatic reports; workers keep running.
+	if err := t.Store.CancelMainWorkerBatches(); err != nil {
+		writeErr(w, 500, err.Error())
 		return
 	}
 	if !s.cancelTaskChat(t.ID, agent.AbortChatStoppedByUser) {

@@ -350,6 +350,23 @@ CREATE TABLE IF NOT EXISTS main_sessions (
     PRIMARY KEY (exploration_id, seq)
 );
 
+-- One dispatch round of the task main agent. Intents atomically carry the
+-- batch id in payload.main_batch_id; planner/worker-created intents do not.
+-- A durable outbox survives idle main conversations and server restarts.
+CREATE TABLE IF NOT EXISTS main_worker_batches (
+    id             BIGSERIAL PRIMARY KEY,
+    exploration_id BIGINT NOT NULL REFERENCES explorations(id) ON DELETE CASCADE,
+    main_seg       INTEGER NOT NULL DEFAULT 0 CHECK (main_seg >= 0),
+    state          TEXT NOT NULL DEFAULT 'collecting'
+                   CHECK (state IN ('collecting','waiting','delivering','delivered','cancelled','interrupted','failed')),
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    finished_at    TIMESTAMPTZ
+);
+CREATE INDEX IF NOT EXISTS idx_main_worker_batches_pending ON main_worker_batches(id)
+    WHERE state = 'waiting';
+CREATE INDEX IF NOT EXISTS idx_intent_main_batch ON exploration_nodes(exploration_id, (payload->>'main_batch_id'))
+    WHERE kind = 'intent' AND payload ? 'main_batch_id';
+
 -- =====================================================================
 -- C. LLM profiles
 -- =====================================================================
