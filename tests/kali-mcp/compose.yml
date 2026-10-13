@@ -1,0 +1,49 @@
+# Third overlay for the lab only. Requires Compose >=2.24 for !reset/!override.
+services:
+  postgres:
+    restart: "no"
+    mem_limit: 256m
+  artex:
+    image: artex-kali-test:local
+    build:
+      context: .
+      dockerfile: tests/kali-mcp/Dockerfile
+    ports: !reset []
+    volumes: !override
+      - ./tests/kali-mcp/secrets:/run/secrets/kali-mcp:ro
+      - ./tests/kali-mcp/artifacts:/results
+    environment:
+      KALI_MCP_ENABLED: "true"
+      KALI_MCP_URL: https://kali-mcp:8081/mcp
+      KALI_MCP_CA_CERT: /run/secrets/kali-mcp/service_ca.crt
+      KALI_MCP_TOKEN_FILE: /run/secrets/kali-mcp/token
+      KALI_TEST_URL: https://kali-mcp:8081/mcp
+      KALI_TEST_TARGET: fixture
+      KALI_TEST_SKILL_DIR: /app/skills
+      KALI_TEST_ARTIFACT_DIR: /results
+      ANTHROPIC_API_KEY: ""
+      OPENAI_API_KEY: ""
+      ARTEX_LLM_PROVIDER: ""
+      ARTEX_LLM_MODEL: ""
+      ARTEX_LLM_BASE_URL: ""
+    restart: "no"
+    mem_limit: 512m
+  kali-mcp:
+    volumes:
+      - ./tests/kali-mcp/secrets:/run/secrets/kali-mcp:ro
+    restart: "no"
+    mem_limit: 6g
+  fixture:
+    image: python:3.12-slim-bookworm
+    command: ["python3", "-m", "http.server", "8000"]
+    networks: [kali-link]
+    mem_limit: 64m
+    read_only: true
+    security_opt: [no-new-privileges:true]
+    cap_drop: [ALL]
+
+networks:
+  default:
+    internal: true
+  kali-link:
+    internal: true

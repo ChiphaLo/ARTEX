@@ -15,6 +15,16 @@ AI 自主渗透测试系统（Go 后端 + Next.js 前端）
 
 ## 截图预览
 
+### 可选 Kali MCP Gateway
+
+通过独立的 `vxcontrol/kali-linux:mcp` 容器提供安全工具；默认关闭，
+不公布 Gateway/监控端口，不给任何 Agent 自动授权。复用 HTTP MCP、
+Skill 延迟加载、权限与审计，不安装 Kali 工具链到 ARTEX。
+支持 Windows 原生 ARTEX 连接 WSL 原生 Kali Gateway，以及两者同在 Linux
+原生运行；无需在 ARTEX 所在环境安装 Docker 或移植 Kali 工具到 Windows。
+启用、原生部署和隔离容器验收见 [Kali MCP 集成文档](docs/kali-mcp-integration.md)。
+
+
 > 完整交互见[在线 Demo](https://artex-demo.mhtsec.com)（纯前端 + Mock 数据，无需后端）。
 
 | 仪表盘（总览 / Token 消耗 / 活动流） | 任务列表 |

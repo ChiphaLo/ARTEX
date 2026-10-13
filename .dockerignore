@@ -1,4 +1,10 @@
 .git
+.env
+secrets
+**/secrets
+tests/kali-mcp/artifacts
+config.json
+jwt.key
 **/node_modules
 web/.next
 web/out

@@ -32,6 +32,7 @@ type FormState = {
   url: string;
   env: string;
   insecure: boolean;
+  ca_cert: string;
 };
 const emptyForm: FormState = {
   name: "",
@@ -41,6 +42,7 @@ const emptyForm: FormState = {
   url: "",
   env: "",
   insecure: false,
+  ca_cert: "",
 };
 
 export default function MCPPage() {
@@ -117,6 +119,7 @@ export default function MCPPage() {
       url: s.url ?? "",
       env: envToText(s.env),
       insecure: s.insecure ?? false,
+      ca_cert: s.ca_cert ?? "",
     });
     setTab("config");
     setOpen(true);
@@ -158,6 +161,7 @@ export default function MCPPage() {
               args: [] as string[],
               env: parseEnv(form.env), // 远程模式下 env 即请求头
               insecure: form.insecure,
+              ca_cert: form.ca_cert.trim(),
             }
           : {
               transport: "stdio" as const,
@@ -165,6 +169,7 @@ export default function MCPPage() {
               args: form.args.trim() ? form.args.trim().split(/\s+/) : [],
               env: parseEnv(form.env),
               insecure: false,
+              ca_cert: "",
             };
       await api.saveMcpServer({
         ...(editing ? { id: editing.id } : {}),
@@ -306,6 +311,10 @@ export default function MCPPage() {
               />
               跳过 TLS 证书校验（自签证书）
             </label>
+              <Label htmlFor="m-ca">专用 CA 证书（推荐，ARTEX 内的 PEM 文件路径）</Label>
+              <Input id="m-ca" value={form.ca_cert} onChange={(e) => setF({ ca_cert: e.target.value })}
+                placeholder="/run/secrets/kali-mcp/service_ca.crt" />
+              <p className="text-xs text-muted-foreground">可用 {"${env:KALI_MCP_CA_CERT}"} 引用。只对本连接生效；Kali 不允许跳过 TLS 校验。</p>
           </div>
         )}
         <div className="grid gap-2">

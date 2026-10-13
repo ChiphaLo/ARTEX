@@ -1536,7 +1536,7 @@ func skillRelPath(file string) (string, string) {
 	if clean == "." || filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
 		return "", "invalid path"
 	}
-	return clean, ""
+	return filepath.ToSlash(clean), ""
 }
 
 // walkSkillFiles returns all files under root (relative to root), sorted,
@@ -1554,6 +1554,7 @@ func walkSkillFiles(root string) ([]string, error) {
 		if relErr != nil || rel == "." {
 			return nil
 		}
+		rel = filepath.ToSlash(rel)
 		if d.IsDir() {
 			entries = append(entries, rel+"/")
 		} else {

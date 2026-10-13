@@ -1,0 +1,11 @@
+.git
+.env
+**/secrets
+config.json
+jwt.key
+**/node_modules
+web/.next
+web/out
+server/webui/dist
+data
+*.db

@@ -815,12 +815,13 @@ type MCPServer struct {
 	Env       json.RawMessage `json:"env"`
 	URL       string          `json:"url,omitempty"`
 	Enabled   bool            `json:"enabled"`
-	Insecure  bool            `json:"insecure"` // http: skip TLS cert verification (self-signed servers, issue #108)
-	Tools     []string        `json:"tools,omitempty"` // cached tool names (mcp_tools_cache)
+	Insecure  bool            `json:"insecure"`          // http: skip TLS cert verification (self-signed servers, issue #108)
+	CACert    string          `json:"ca_cert,omitempty"` // per-connection CA trust
+	Tools     []string        `json:"tools,omitempty"`   // cached tool names (mcp_tools_cache)
 }
 
 func (d *DB) ListMCP() ([]*MCPServer, error) {
-	rows, err := d.Query(`SELECT id,name,transport,COALESCE(command,''),args,env,COALESCE(url,''),enabled,insecure FROM mcp_servers ORDER BY id`)
+	rows, err := d.Query(`SELECT id,name,transport,COALESCE(command,''),args,env,COALESCE(url,''),enabled,insecure,ca_cert FROM mcp_servers ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -828,7 +829,7 @@ func (d *DB) ListMCP() ([]*MCPServer, error) {
 	for rows.Next() {
 		var m MCPServer
 		var args, env []byte
-		if err := rows.Scan(&m.ID, &m.Name, &m.Transport, &m.Command, &args, &env, &m.URL, &m.Enabled, &m.Insecure); err != nil {
+		if err := rows.Scan(&m.ID, &m.Name, &m.Transport, &m.Command, &args, &env, &m.URL, &m.Enabled, &m.Insecure, &m.CACert); err != nil {
 			rows.Close()
 			return nil, err
 		}
@@ -918,12 +919,12 @@ func (d *DB) SaveMCP(m *MCPServer) (int64, error) {
 	}
 	if m.ID == 0 {
 		var id int64
-		err := d.QueryRow(`INSERT INTO mcp_servers(name,transport,command,args,env,url,enabled,insecure) VALUES ($1,$2,NULLIF($3,''),$4,$5,NULLIF($6,''),$7,$8) RETURNING id`,
-			m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure).Scan(&id)
+		err := d.QueryRow(`INSERT INTO mcp_servers(name,transport,command,args,env,url,enabled,insecure,ca_cert) VALUES ($1,$2,NULLIF($3,''),$4,$5,NULLIF($6,''),$7,$8,$9) RETURNING id`,
+			m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.CACert).Scan(&id)
 		return id, err
 	}
-	_, err := d.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8 WHERE id=$9`,
-		m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.ID)
+	_, err := d.Exec(`UPDATE mcp_servers SET name=$1,transport=$2,command=NULLIF($3,''),args=$4,env=$5,url=NULLIF($6,''),enabled=$7,insecure=$8,ca_cert=$9 WHERE id=$10`,
+		m.Name, m.Transport, m.Command, args, env, m.URL, m.Enabled, m.Insecure, m.CACert, m.ID)
 	return m.ID, err
 }
 

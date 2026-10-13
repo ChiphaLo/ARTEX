@@ -1169,6 +1169,7 @@ export interface AgentDetail {
 
 // ---- MCP ----
 export interface MCPServer {
+  ca_cert?: string;
   id: number;
   name: string;
   transport: "stdio" | "http" | "sse";

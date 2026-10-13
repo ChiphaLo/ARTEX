@@ -12,7 +12,6 @@ import (
 	"bufio"
 	"bytes"
 	"context"
-	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -97,14 +96,15 @@ func normalizeHeaders(headers map[string]string) (map[string]string, error) {
 // When insecure is true, TLS certificate verification is skipped so servers that
 // present a self-signed certificate can still be reached (issue #108).
 func New(ctx context.Context, server, url string, headers map[string]string, insecure bool) (*Client, error) {
-	cleanHeaders, err := normalizeHeaders(headers)
+	return NewWithOptions(ctx, server, url, headers, Options{Insecure: insecure})
+}
+
+func NewWithOptions(ctx context.Context, server, url string, headers map[string]string, opts Options) (*Client, error) {
+	hc, cleanHeaders, err := newHTTPClient(headers, opts)
 	if err != nil {
 		return nil, err
 	}
-	hc := &http.Client{Timeout: 120 * time.Second}
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
-	}
+	hc.Timeout = 120 * time.Second
 	c := &Client{
 		server:   server,
 		url:      url,
@@ -113,7 +113,8 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 		protocol: protocolVersion,
 	}
 	if err := c.initialize(ctx); err != nil {
-		return nil, err
+		_ = c.Close()
+		return nil, c.safeError(err)
 	}
 	return c, nil
 }
@@ -122,13 +123,13 @@ func New(ctx context.Context, server, url string, headers map[string]string, ins
 // announces a per-session POST /message endpoint, while JSON-RPC responses are
 // delivered asynchronously as SSE message events.
 func NewSSE(ctx context.Context, server, sseURL string, headers map[string]string, insecure bool) (*Client, error) {
-	cleanHeaders, err := normalizeHeaders(headers)
+	return NewSSEWithOptions(ctx, server, sseURL, headers, Options{Insecure: insecure})
+}
+
+func NewSSEWithOptions(ctx context.Context, server, sseURL string, headers map[string]string, opts Options) (*Client, error) {
+	hc, cleanHeaders, err := newHTTPClient(headers, opts)
 	if err != nil {
 		return nil, err
-	}
-	hc := &http.Client{} // the SSE stream is intentionally long-lived.
-	if insecure {
-		hc.Transport = &http.Transport{TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
 	}
 	streamCtx, cancel := context.WithCancel(context.Background())
 	req, err := http.NewRequestWithContext(streamCtx, http.MethodGet, sseURL, nil)
@@ -143,12 +144,12 @@ func NewSSE(ctx context.Context, server, sseURL string, headers map[string]strin
 	resp, err := hc.Do(req)
 	if err != nil {
 		cancel()
-		return nil, err
+		return nil, (&Client{headers: cleanHeaders}).safeError(err)
 	}
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		defer resp.Body.Close()
 		cancel()
-		return nil, fmt.Errorf("mcp sse http %d: %s", resp.StatusCode, readSnippet(resp.Body))
+		return nil, (&Client{headers: cleanHeaders}).safeError(fmt.Errorf("mcp sse http %d: %s", resp.StatusCode, readSnippet(resp.Body)))
 	}
 	reader := bufio.NewReader(resp.Body)
 	endpoint, err := readSSEEndpoint(reader, sseURL)
@@ -244,33 +245,63 @@ func (c *Client) initialize(ctx context.Context) error {
 	if version == "" {
 		version = protocolVersion
 	}
-	if _, err := c.call(ctx, "initialize", map[string]any{
+	raw, err := c.call(ctx, "initialize", map[string]any{
 		"protocolVersion": version,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "artex", "version": "0.2"},
-	}); err != nil {
+	})
+	if err != nil {
 		return err
+	}
+	var init struct {
+		Protocol string `json:"protocolVersion"`
+	}
+	if err := json.Unmarshal(raw, &init); err != nil {
+		return fmt.Errorf("MCP initialize returned invalid JSON")
+	}
+	if init.Protocol != "" {
+		c.protocol = init.Protocol
 	}
 	return c.notify(ctx, "notifications/initialized", map[string]any{})
 }
 
 // Tools lists the server's tools and adapts them to CoreTools.
 func (c *Client) Tools(ctx context.Context) ([]actool.CoreTool, error) {
-	raw, err := c.call(ctx, "tools/list", map[string]any{})
-	if err != nil {
-		return nil, err
+	var out []actool.CoreTool
+	seenNames, seenCursors := map[string]bool{}, map[string]bool{}
+	cursor := ""
+	for {
+		params := map[string]any{}
+		if cursor != "" {
+			params["cursor"] = cursor
+		}
+		raw, err := c.call(ctx, "tools/list", params)
+		if err != nil {
+			return nil, err
+		}
+		var res struct {
+			Tools      []remoteTool `json:"tools"`
+			NextCursor string       `json:"nextCursor"`
+		}
+		if err := json.Unmarshal(raw, &res); err != nil {
+			return nil, fmt.Errorf("MCP tools/list returned invalid JSON")
+		}
+		for _, rt := range res.Tools {
+			if rt.Name == "" || seenNames[rt.Name] {
+				return nil, fmt.Errorf("MCP tools/list returned empty or duplicate tool name")
+			}
+			seenNames[rt.Name] = true
+			out = append(out, c.wrap(rt))
+		}
+		cursor = res.NextCursor
+		if cursor == "" {
+			return out, nil
+		}
+		if seenCursors[cursor] {
+			return nil, fmt.Errorf("MCP tools/list pagination cursor repeated")
+		}
+		seenCursors[cursor] = true
 	}
-	var res struct {
-		Tools []remoteTool `json:"tools"`
-	}
-	if err := json.Unmarshal(raw, &res); err != nil {
-		return nil, err
-	}
-	out := make([]actool.CoreTool, 0, len(res.Tools))
-	for _, rt := range res.Tools {
-		out = append(out, c.wrap(rt))
-	}
-	return out, nil
 }
 
 type remoteTool struct {
@@ -295,7 +326,12 @@ func (c *Client) wrap(rt remoteTool) actool.CoreTool {
 		Run: func(ctx context.Context, in json.RawMessage, tc *actool.ToolContext) (actool.Result, error) {
 			var args any
 			if len(in) > 0 {
-				_ = json.Unmarshal(in, &args)
+				if err := json.Unmarshal(in, &args); err != nil {
+					return actool.Errorf("invalid MCP tool input JSON"), nil
+				}
+			}
+			if args == nil {
+				args = map[string]any{}
 			}
 			raw, err := c.call(ctx, "tools/call", map[string]any{"name": rt.Name, "arguments": args})
 			if err != nil {
@@ -355,6 +391,7 @@ func (c *Client) Call(ctx context.Context, tool string, args any) (string, error
 // Close terminates the MCP session best-effort (DELETE with the session id, per the
 // Streamable HTTP spec). Servers that don't track sessions simply ignore it.
 func (c *Client) Close() error {
+	defer c.http.CloseIdleConnections()
 	if c.legacySSE {
 		if c.streamCancel != nil {
 			c.streamCancel()
@@ -370,15 +407,19 @@ func (c *Client) Close() error {
 	}
 	c.mu.Lock()
 	sid := c.sessionID
+	c.sessionID = ""
 	c.mu.Unlock()
 	if sid == "" {
 		return nil
 	}
-	req, err := http.NewRequest(http.MethodDelete, c.url, nil)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, c.url, nil)
 	if err != nil {
 		return nil
 	}
 	req.Header.Set("Mcp-Session-Id", sid)
+	req.Header.Set("MCP-Protocol-Version", c.protocol)
 	for k, v := range c.headers {
 		req.Header.Set(k, v)
 	}
@@ -397,20 +438,20 @@ func (c *Client) call(ctx context.Context, method string, params any) (json.RawM
 	c.mu.Unlock()
 	resp, err := c.roundTrip(ctx, rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}, true)
 	if err != nil {
-		return nil, err
+		return nil, c.safeError(err)
 	}
 	if resp == nil {
 		return nil, fmt.Errorf("mcp: empty response for %s", method)
 	}
 	if resp.Error != nil {
-		return nil, resp.Error
+		return nil, c.safeError(resp.Error)
 	}
 	return resp.Result, nil
 }
 
 func (c *Client) notify(ctx context.Context, method string, params any) error {
 	_, err := c.roundTrip(ctx, rpcRequest{JSONRPC: "2.0", Method: method, Params: params}, false)
-	return err
+	return c.safeError(err)
 }
 
 // roundTrip POSTs one JSON-RPC frame. When expectResp is false (a notification) the
@@ -472,6 +513,9 @@ func (c *Client) roundTrip(ctx context.Context, body rpcRequest, expectResp bool
 	var out rpcResponse
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
 		return nil, fmt.Errorf("mcp: decode json response: %w", err)
+	}
+	if out.ID != body.ID {
+		return nil, fmt.Errorf("MCP response ID does not match request")
 	}
 	return &out, nil
 }

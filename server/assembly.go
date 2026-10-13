@@ -80,7 +80,7 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 				}
 				directVisible := want[m.ID]
 				skillGated := gated[m.Name]
-				if !directVisible && !skillGated {
+				if !canUseMCP(m, directVisible, skillGated) {
 					continue // neither directly visible nor referenced by a visible skill
 				}
 				cl, err := connectMCP(ctx, m)
@@ -95,6 +95,10 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue
 				}
 				for _, t := range ts {
+					if m.Name == kaliMCPName {
+						t = meterTool(t, pg, t.Name(), a.Key, agent.RunInfoFrom(ctx))
+						t = &kaliAuditedTool{CoreTool: t}
+					}
 					extra = append(extra, t)
 					allNames = append(allNames, t.Name())
 					serverTools[m.Name] = append(serverTools[m.Name], t.Name())

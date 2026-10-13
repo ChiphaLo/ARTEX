@@ -255,6 +255,7 @@ type mcpToolInput struct {
 	URL       string          `json:"url"`
 	Enabled   *bool           `json:"enabled"`
 	Insecure  *bool           `json:"insecure"`
+	CACert    string          `json:"ca_cert"`
 }
 
 func mcpSchema(withID bool) map[string]any {
@@ -263,8 +264,9 @@ func mcpSchema(withID bool) map[string]any {
 		"transport": strParam("stdio | http / sse"),
 		"command":   strParam("stdio 的启动命令(如 npx)"),
 		"args":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "命令参数数组"},
-		"env":       map[string]any{"type": "object", "description": "环境变量 {KEY:VALUE}"},
+		"env":       map[string]any{"type": "object", "description": "stdio 环境变量；http/sse 请求头 {KEY:VALUE}，支持显式 env/file Secret 引用，勿写入明文密钥"},
 		"url":       strParam("http/sse 的 URL"),
+		"ca_cert":   strParam("http/sse 专用 CA PEM 路径，可用显式 env 引用"),
 		"enabled":   map[string]any{"type": "boolean", "description": "是否启用(默认 true)"},
 		"insecure":  map[string]any{"type": "boolean", "description": "http: 跳过 TLS 证书校验(自签证书时置 true, 默认 false)"},
 	}
@@ -287,7 +289,7 @@ func (a mcpToolInput) toDB() *db.MCPServer {
 	}
 	return &db.MCPServer{
 		ID: a.ID, Name: a.Name, Transport: a.Transport, Command: a.Command,
-		Args: a.Args, Env: a.Env, URL: a.URL, Enabled: enabled, Insecure: insecure,
+		Args: a.Args, Env: a.Env, URL: a.URL, Enabled: enabled, Insecure: insecure, CACert: a.CACert,
 	}
 }
 

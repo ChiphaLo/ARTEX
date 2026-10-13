@@ -4,8 +4,17 @@
 
 ## [Unreleased]
 
+### 新增的功能
+
+- **可选 Kali Linux MCP Gateway**：独立 Bridge 容器、默认关闭/不公布端口/Burp 需明确 EULA 接受；新增环境配置、幂等注册与异步重试发现，沿用 Skill 与延迟工具加载，默认不授予任何 Agent。
+- **MCP 安全连接配置**：运行时 env/file Secret 引用与每连接 CA，扩展 Streamable HTTP 分页、初始化协商、错误脱敏和会话关闭；Kali 强制验证 HTTPS，调用复用权限和工具审计。新增隔离 Docker 验收脚本及单元测试。
+- **Kali 原生部署支持**：提供恢复上游镜像 ENV 的原生 Gateway launcher 与 Windows + WSL、Linux 原生部署文档；三条隔离集成路径已验收，不替换既有生产部署，不设置开机自启。
+- **隔离回归测试清理**：聊天配置测试在清理临时 LLM Profile 后再关闭数据库，避免假凭据残留并使后续核心生命周期测试尝试访问外部 LLM；不改变产品调度逻辑。
+
 ### 修复的问题
 
+- **Windows 原生兼容**：证据保存不再对 Windows 只读目录句柄执行不支持的 fsync（保留正文 fsync/同卷 atomic rename）；Skill 文件相对路径统一为斜线。隔离 LLM 计量测试自行初始化用量表。
+- **受限容器 Nmap 启动**：清除上游 Nmap 的文件 capability，避免默认禁用 NET_ADMIN 时 exec 被拒绝；仍保留 no-new-privileges 与容器 NET_RAW，不授予 NET_ADMIN。验收脚本等待 Gateway 与 Metasploit RPC 就绪。
 - **修复 Responses 流式工具参数串线**：按工具调用的 `item_id` 关联参数增量与结束事件，支持交错、并行的工具调用；缺失或损坏的增量可回退到结束事件中的完整参数，避免多份 JSON 被拼到同一个工具调用。统一消息累积器与流式工具执行路径，并保持 Anthropic、Chat Completions 的索引关联兼容。
 - **修复 Responses 旁路回答被误判为中断**：将 `response.completed` / `response.incomplete` 转为内部用量事件和显式完成事件；未收到终态的截断流不会被错误标记为完成。
 - **修复 DeepSeek 旁路摘要耗尽输出预算**：配置了推理强度的 Responses 模型在摘要请求指定 `Thinking=disabled` 时，显式发送 `reasoning.effort=none`，避免网关默认推理占满摘要 token 上限；主回答仍保留原推理配置与流式输出。

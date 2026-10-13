@@ -234,6 +234,7 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
+		go s.runKaliMCP()
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
 	}
 	// precedence: persisted DB config > env.
