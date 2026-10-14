@@ -97,7 +97,7 @@ func scanInbox(rows *sql.Rows) ([]AgentInboxItem, error) {
 	}
 	return out, rows.Err()
 }
-func (d *DB) DrainAgentSteers(ctx context.Context, scope string) ([]AgentInboxItem, error) {
+func (d *DB) DrainAgentSteers(ctx context.Context, scope string, runIDs ...int64) ([]AgentInboxItem, error) {
 	tx, err := d.inboxTx(ctx, scope)
 	if err != nil {
 		return nil, err
@@ -115,6 +115,23 @@ func (d *DB) DrainAgentSteers(ctx context.Context, scope string) ([]AgentInboxIt
 		out[index].State = "delivered"
 		if _, err = tx.ExecContext(ctx, `UPDATE agent_inbox SET state='delivered',finished_at=now() WHERE id=$1`, i.ID); err != nil {
 			return nil, err
+		}
+	}
+	if len(out) > 0 && len(runIDs) == 1 && runIDs[0] > 0 {
+		var p struct {
+			Message string `json:"message"`
+		}
+		if err = json.Unmarshal(out[len(out)-1].Payload, &p); err != nil {
+			return nil, err
+		}
+		background, _ := json.Marshal(map[string]string{"source": "user_message", "text": p.Message})
+		r, e := tx.ExecContext(ctx, `UPDATE agent_session_runs SET review_background=$3 WHERE id=$1 AND scope_key=$2 AND state='running'`, runIDs[0], scope, string(background))
+		if e != nil {
+			return nil, e
+		}
+		n, _ := r.RowsAffected()
+		if n != 1 {
+			return nil, ErrSessionRunConflict
 		}
 	}
 	return out, tx.Commit()
@@ -243,12 +260,12 @@ func (d *DB) CancelAgentSteers(scope string) error {
 	return err
 }
 func (d *DB) CancelTaskSteers(taskID int64) error {
-	_, err := d.Exec(`UPDATE agent_inbox SET state='cancelled',finished_at=now() WHERE task_id=$1 AND mode='steer' AND state='pending'`, taskID)
+	_, err := d.Exec(`UPDATE agent_inbox SET state='cancelled',finished_at=now() WHERE task_id=$1 AND scope_key LIKE 'main:%' AND mode='steer' AND state='pending'`, taskID)
 	return err
 }
 func (d *DB) HasTaskInbox(taskID int64) (bool, error) {
 	var yes bool
-	err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_inbox WHERE task_id=$1 AND state IN ('pending','running'))`, taskID).Scan(&yes)
+	err := d.QueryRow(`SELECT EXISTS(SELECT 1 FROM agent_inbox WHERE task_id=$1 AND scope_key LIKE 'main:%' AND state IN ('pending','running'))`, taskID).Scan(&yes)
 	return yes, err
 }
 func (d *DB) RecoverAgentInbox() error {

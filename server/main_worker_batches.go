@@ -96,11 +96,20 @@ func (s *Server) pumpMainWorkerBatches() {
 		ctx = agent.WithMainWorkerCompletion(ctx)
 		// Do not label generated worker output as current human instructions.
 		ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: "worker_completion"})
+		var runErr error
+		ctx, runErr = s.startSessionRun(ctx, mainInboxScope(id, b.MainSeg), b.TaskID, 0, true)
+		if runErr != nil {
+			budgetCancel()
+			cancel(agent.AbortChatTurnFinished)
+			s.m.pg.FinishMainWorkerBatch(b.ID, "failed")
+			s.chatMu.Unlock()
+			continue
+		}
 		s.chatBusy[id] = true
 		s.chatCancel[id] = cancel
 		s.chatMu.Unlock()
 		go func(b db.MainWorkerBatch) {
-			defer func() { budgetCancel(); s.finishTaskChat(id, cancel) }()
+			defer func() { s.finishSessionRun(ctx, runErr); budgetCancel(); s.finishTaskChat(id, cancel) }()
 			seg := b.MainSeg
 			metadata, _ := json.Marshal(map[string]any{"source": "worker_batch", "batch_id": b.ID})
 			s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", MainSeg: &seg,
@@ -109,6 +118,7 @@ func (s *Server) pumpMainWorkerBatches() {
 			ctx = s.attachLiveInbox(ctx, mainInboxScope(id, seg), "mainagent", filepath.Join(s.m.dir, "tasks", id), emit)
 			s.engine.BeginLLMCall(id)
 			_, err := ma.Chat(ctx, b.TaskID, b.MainSeg, s.m.Assets(), t.Store, t.Goal, message, emit, t.Notify, nil, t.NotifyGoal, t.NotifyHint)
+			runErr = err
 			s.engine.EndLLMCall(id)
 			state := "delivered"
 			if ctx.Err() != nil {

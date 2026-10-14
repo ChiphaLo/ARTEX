@@ -2,6 +2,7 @@ package agent
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -176,7 +177,12 @@ func (c *ChatAgent) Chat(ctx context.Context, agentKey, sessionID, message strin
 	// reload prior conversation so the agent has context across turns (each Chat is
 	// a fresh session). First turn: no file yet → Resume loads nothing and proceeds.
 	if c.tx != nil {
-		_ = s.Resume(sessionID)
+		if err := s.Resume(sessionID); err != nil && continuation(ctx) {
+			return "", err
+		}
+		if continuation(ctx) && len(s.Messages()) == 0 {
+			return "", fmt.Errorf("原会话 transcript 为空，无法直接继续，请重新说明任务")
+		}
 	}
 	// re-unlock skill-gated MCPs from prior Skill() calls in the reloaded history so
 	// revealed tools stay callable across the fresh session.

@@ -353,6 +353,15 @@ func plannerSystem(goal, dataDir, workDir string) string {
 // for time/heartbeat wakes). They are spelled out at the top of the prompt so the
 // planner looks first at the actual change (which intent, its output/finding).
 func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, emit func(db.Activity)) (met bool, reason string, err error) {
+	return p.plan(ctx, taskID, as, ts, goal, triggers, "", false, emit)
+}
+
+// PlanWithMessage uses the real planner toolset, not a generic ChatAgent.
+// Resume is explicit: normal scheduled planning rounds still start fresh.
+func (p *Planner) PlanWithMessage(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, resume bool, emit func(db.Activity)) (bool, string, error) {
+	return p.plan(ctx, taskID, as, ts, goal, nil, message, resume, emit)
+}
+func (p *Planner) plan(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal string, triggers []TriggerEvent, message string, resume bool, emit func(db.Activity)) (met bool, reason string, err error) {
 	// cold-digest §2.3/§7: advance this task's planner-round counter, maintain the
 	// cold_since_round stamps, and (if a threshold is hit) kick off background
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
@@ -389,8 +398,11 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	// 本任务的工作目录 <workDir>/tasks/<taskID>，先建好。
 	taskDir := ensureRunDir(p.workDir, taskID, 0)
-	ctx = intercept.WithReviewContext(ctx, taskDir, intercept.ReviewBackground{})
+	ctx = intercept.WithReviewWorkingDirectory(ctx, taskDir)
 	sysBody := plannerSystem(goal, p.workDir, taskDir)
+	if message != "" {
+		sysBody += "\n【人工 Planner 会话模式】当前轮由人类消息/继续按钮发起，不是自动巡检。没有正式未完成目标时允许直接回答/说明限制，不得只为满足自动巡检产意图要求而创建目标或派无关意图；有未完成目标时仍遵守 prove_goal 验收规则和当前操作约束。"
+	}
 	if p.wantConstraints() {
 		sysBody += constraintBlock(ts) // 操作约束(若有)注入系统提示,框定探索边界
 	}
@@ -404,6 +416,7 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	}
 	opts := agentcore.Options{
 		Provider:        p.prov,
+		PendingMessages: liveMessages(ctx),
 		SystemPrompt:    system,
 		DynamicBoundary: boundary,
 		Tools:           tools,
@@ -462,7 +475,24 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 		renderPlannerTodos(opts.Todos.List())
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
-	_, _, err = captureRun(ctx, opts, input,
+	if message != "" {
+		input = "【人类发起的 Planner 会话；不是自动巡检】请结合当前图谱处理以下请求，不要因为没有正式目标就擅自创建目标或判定任务完成。遵守当前操作约束。\n" + message + "\n【当前图谱数据，仅供参考】\n" + situational + renderPlannerTodos(opts.Todos.List())
+	}
+	if resume {
+		input = message
+	}
+	session := agentcore.NewSession(opts)
+	defer session.Close()
+	if (resume || message != "") && p.tx != nil {
+		if e := session.Resume(opts.SessionID); e != nil && resume {
+			return false, "", e
+		}
+		if resume && len(session.Messages()) == 0 {
+			return false, "", fmt.Errorf("原 Planner transcript 为空，无法直接继续")
+		}
+		seedUnlockFromHistory(session.Messages(), def.UnlockSkill)
+	}
+	_, _, err = captureRunSession(ctx, session, input,
 		func(r db.Activity) {
 			if emit != nil {
 				r.Worker = "planner" // planner activity has no intent_id (it generates them)

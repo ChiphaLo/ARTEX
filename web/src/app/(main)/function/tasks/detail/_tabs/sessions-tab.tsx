@@ -28,6 +28,7 @@ import {
 import { toast } from "sonner";
 
 import { AgentInbox, useInboxRequestID } from "@/components/agent-inbox";
+import { AgentContinueButton, PlannerComposer } from "@/components/agent-run-controls";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
@@ -1913,7 +1914,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     activity={activity}
                     live={active.live}
                     taskId={taskId}
-                    chat={isMain}
+                    chat={isMain || isPlanner}
                     focusedSeq={focusHistory.ready ? approvalFocus.state?.source?.seq : undefined}
                   />
                 ) : (
@@ -1925,6 +1926,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             </ScrollArea>
             {isMain ? (
               <div className="border-t p-3">
+                <AgentContinueButton
+                  base={`/tasks/${taskId}/chat?seg=${active.seg ?? 0}`}
+                  onStarted={() => setMainChatRunning(true)}
+                />
                 <AgentInbox base={`/tasks/${taskId}/chat/inbox?seg=${active.seg ?? 0}`} refreshKey={inboxRefresh} />
                 {attachments.length > 0 && (
                   <div className="mb-2 flex flex-wrap gap-1.5">
@@ -2042,6 +2047,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                   </InputGroupAddon>
                 </InputGroup>
               </div>
+            ) : isPlanner ? (
+              <PlannerComposer taskId={taskId} />
             ) : active.role === "worker" &&
               !active.inherited &&
               (active.status === "running" || active.status === "paused") ? (
@@ -2131,6 +2138,30 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     )}
                   </InputGroupAddon>
                 </InputGroup>
+              </div>
+            ) : active.role === "worker" &&
+              !active.inherited &&
+              (active.status === "blocked" || active.status === "exhausted") ? (
+              <div className="border-t px-4 py-2">
+                <Button
+                  size="sm"
+                  variant="outline"
+                  disabled={controllingIntent === active.intent_id}
+                  onClick={() => {
+                    if (!active.intent_id || controllingIntent) return;
+                    setControllingIntent(active.intent_id);
+                    void api
+                      .rerunIntent(taskId, active.intent_id)
+                      .then(() => {
+                        patchIntentState(active.intent_id!, "open");
+                        toast.success("已继续 Worker，沿用原会话与已保存进度；任务可能需要重新入场");
+                      })
+                      .catch((e) => toast.error("继续失败：" + (e as Error).message))
+                      .finally(() => setControllingIntent(null));
+                  }}
+                >
+                  继续 Worker
+                </Button>
               </div>
             ) : (
               <div className="flex items-center border-t px-4 py-2">

@@ -38,6 +38,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	ctx, auditTrace := intercept.WithTrace(ctx, input, approvalHistory(s.Messages()))
 	defer auditTrace.Finish()
 	var reason harness.TerminalReason
+	defer func() { reportRunOutcome(ctx, reason) }()
 	rec := func(r db.Activity) {
 		if r.Kind == "text" || r.Kind == "tool_result" {
 			auditTrace.Append(db.InterceptContextEntry{Kind: r.Kind, Tool: r.Tool, ToolUseID: r.ToolUseID, Text: r.Detail, IsError: r.IsError})

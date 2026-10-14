@@ -204,7 +204,12 @@ func (m *MainAgent) Chat(ctx context.Context, taskID int64, mainSeg int, as *db.
 	// across turns (each Chat is a fresh session; without this it can't see earlier
 	// messages). First turn: no file yet → Resume loads nothing and proceeds.
 	if m.tx != nil {
-		_ = s.Resume(opts.SessionID)
+		if err := s.Resume(opts.SessionID); err != nil && continuation(ctx) {
+			return "", err
+		}
+		if continuation(ctx) && len(s.Messages()) == 0 {
+			return "", fmt.Errorf("原会话 transcript 为空，无法直接继续，请重新说明任务")
+		}
 	}
 	// C2: this session is fresh each turn; re-unlock skill-gated MCPs from prior
 	// Skill() calls in the reloaded history so revealed tools stay callable.

@@ -238,6 +238,13 @@ function inboxItemPath(base: string, suffix: string) {
   return `${path}/${suffix}${query ? `?${query}` : ""}`;
 }
 
+export type AgentRunStatus = {
+  running: boolean;
+  can_continue: boolean;
+  run_id?: number;
+  state?: string;
+  read_only?: boolean;
+};
 export type AgentMessageMode = "steer" | "queue";
 export type AgentInboxItem = {
   id: number;
@@ -908,6 +915,23 @@ export const api = {
       mode,
       request_id,
     }),
+  agentRunStatus: (base: string) => get<AgentRunStatus>(inboxItemPath(base, "run")),
+  continueAgentRun: (base: string, run_id: number) =>
+    post<{ status: string }>(inboxItemPath(base, "continue"), { run_id }),
+  sendPlannerMessage: (
+    taskId: string,
+    message: string,
+    mode: AgentMessageMode,
+    request_id: string,
+    attachments?: ChatAttachment[],
+  ) =>
+    post<{ id: number; state: string }>(`/tasks/${taskId}/planner/messages`, {
+      message,
+      mode,
+      request_id,
+      attachments,
+    }),
+  stopPlanner: (taskId: string) => post<{ status: string }>(`/tasks/${taskId}/planner/stop`, {}),
   agentInbox: (base: string) => get<AgentInboxResponse>(base),
   editAgentInbox: (base: string, id: number, message: string, revision: number, attachments?: ChatAttachment[]) =>
     patch<AgentInboxResponse>(inboxItemPath(base, String(id)), { message, revision, attachments }),

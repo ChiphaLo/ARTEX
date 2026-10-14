@@ -1423,3 +1423,21 @@ CREATE TABLE IF NOT EXISTS agent_inbox (
  CHECK ((task_id IS NOT NULL AND conversation_id IS NULL) OR (task_id IS NULL AND conversation_id IS NOT NULL))
 );
 CREATE INDEX IF NOT EXISTS idx_agent_inbox_pending ON agent_inbox(scope_key,id) WHERE state='pending';
+
+-- Explicit run journal: a Continue click is a control operation, not new human
+-- instructions. Persist ownership, approval provenance and read-only capability.
+CREATE TABLE IF NOT EXISTS agent_session_runs (
+ id BIGSERIAL PRIMARY KEY,
+ scope_key TEXT NOT NULL,
+ task_id BIGINT REFERENCES tasks(id) ON DELETE CASCADE,
+ conversation_id BIGINT REFERENCES conversations(id) ON DELETE CASCADE,
+ state TEXT NOT NULL DEFAULT 'running' CHECK(state IN ('running','completed','interrupted','failed','budget')),
+ read_only BOOLEAN NOT NULL DEFAULT false,
+ review_background JSONB NOT NULL DEFAULT '{}',
+ resume_of BIGINT,
+ started_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+ finished_at TIMESTAMPTZ,
+ CHECK ((task_id IS NOT NULL) <> (conversation_id IS NOT NULL))
+);
+CREATE INDEX IF NOT EXISTS idx_agent_session_latest ON agent_session_runs(scope_key,id DESC);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_agent_session_running ON agent_session_runs(scope_key) WHERE state='running';

@@ -134,6 +134,10 @@ type Engine struct {
 	steerMu  sync.Mutex
 	steerBox map[int64][]string
 
+	plannerMu    sync.Mutex
+	plannerRuns  map[string]*plannerExecution
+	plannerHeld  func(*Task) bool
+	plannerRun   func(context.Context, *Task, *agent.Planner, []agent.TriggerEvent, func(db.Activity)) (bool, string, error)
 	plannerRound sync.Map // taskID -> int, planner round counter (for UI round separators)
 
 	// 任务级超时(见 docs/任务级超时与收尾设计.md):
@@ -295,6 +299,7 @@ func (e *Engine) StopTask(taskID string) {
 // planner.Plan / worker.Execute), if present. Shared by Pause and the settle
 // sequence's hard-drain backstop.
 func (e *Engine) cancelExec(taskID string, cause error) {
+	e.cancelPlanner(taskID, cause)
 	e.execMu.Lock()
 	if cancel := e.execCancel[taskID]; cancel != nil {
 		cancel(cause)
@@ -839,6 +844,9 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if e.isSettling(t.ID) {
 			return
 		}
+		if e.plannerHeld != nil && e.plannerHeld(t) {
+			return
+		}
 		// goalless（人工直投）分支：任务已无 open 目标时 planner 不跑——跑了会重判
 		// met→cancelExec 杀掉用户经主 agent 直投的意图。是否结束改由 frontier 决定：
 		// 还有 open/running 意图 → 保持 running、静默等待；意图已全部跑干 → 落 done。
@@ -868,6 +876,12 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		if ectx.Err() != nil || e.IsDeleting(t.ID) {
 			return
 		}
+		runCtx, _, release, admitted := e.beginPlanner(ectx, t.ID)
+		if !admitted {
+			return
+		}
+		defer release()
+		ectx = runCtx
 		log.Printf("[planner] task %s 规划中…(%s 触发)", t.ID, src)
 		// round marker: each Plan() is one planner round; emit a boundary so the
 		// UI can separate rounds in the transcript (kind='round').
@@ -878,7 +892,14 @@ func (e *Engine) plannerLoop(ctx context.Context, t *Task) {
 		triggers := t.drainTriggers()
 		taskIDInt, _ := strconv.ParseInt(t.ID, 10, 64)
 		e.BeginLLMCall(t.ID)
-		met, reason, err := planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		var met bool
+		var reason string
+		var err error
+		if e.plannerRun != nil {
+			met, reason, err = e.plannerRun(ectx, t, planner, triggers, emit)
+		} else {
+			met, reason, err = planner.Plan(ectx, taskIDInt, e.m.assets, t.Store, t.Goal, triggers, emit)
+		}
 		e.EndLLMCall(t.ID)
 		switch {
 		case err != nil && ectx.Err() == nil:

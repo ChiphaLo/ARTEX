@@ -416,13 +416,16 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 400, err.Error())
 		return
 	}
+	control := resumeControl(r.Context())
 	msg := strings.TrimSpace(req.Message)
-	if msg == "" && len(req.Attachments) == 0 {
+	if control == nil && msg == "" && len(req.Attachments) == 0 {
 		writeErr(w, 400, "消息不能为空")
 		return
 	}
 	agentMessage := ""
-	if d := deliveryFrom(r.Context()); d != nil {
+	if control != nil {
+		agentMessage = s.continuationInput(s.convBusyKey(c.ID), nil, c.ID, 0)
+	} else if d := deliveryFrom(r.Context()); d != nil {
 		agentMessage = d.payload.AgentMessage
 	} else {
 		var ok bool
@@ -451,6 +454,26 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 		writeErr(w, 409, "该会话正在处理上一条消息，请稍候")
 		return
 	}
+	parent := intercept.WithConvID(s.ctx, c.ID)
+	if deliveryFrom(r.Context()) != nil {
+		parent = intercept.WithConvID(r.Context(), c.ID)
+	}
+	ctx, cancel := context.WithCancelCause(parent)
+	ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: msg})
+	if control != nil {
+		ctx = bindResume(ctx, control)
+	}
+	if d := deliveryFrom(r.Context()); d != nil {
+		ctx = context.WithValue(ctx, inboxDeliveryKey{}, d)
+	}
+	ctx, startErr := s.startSessionRun(ctx, busyKey, 0, c.ID, false)
+	if startErr != nil {
+		cancel(agent.AbortChatTurnFinished)
+		s.chatMu.Unlock()
+		sessionRunError(w, startErr)
+		return
+	}
+	s.chatCancel[busyKey] = cancel
 	s.chatBusy[busyKey] = true
 	s.chatMu.Unlock()
 
@@ -462,6 +485,9 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// so the transcript lazy-loads Detail to show the message untruncated).
 	ua := userActivityWithAttachments(c.AgentKey, msg, req.Attachments)
 	ua.Summary = firstLine(msg, 200)
+	if control != nil {
+		ua = resumeActivity(c.AgentKey, control.ID)
+	}
 	if d := deliveryFrom(r.Context()); d != nil {
 		inboxMetadata(&ua, d.item.Mode, d.item.ID)
 	}
@@ -471,7 +497,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	if _, err := pg.AppendConvActivity(c.ID, ua); err != nil {
 		log.Printf("[conv %d] append user msg failed: %v", c.ID, err)
 	}
-	if c.Title == "" || c.Title == "新对话" {
+	if control == nil && (c.Title == "" || c.Title == "新对话") {
 		title := firstLine(msg, 40)
 		if title == "" {
 			title = "附件消息"
@@ -485,11 +511,6 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
-	ctx, cancel := s.conversationRunContext(c.ID, busyKey, r.Context())
-	ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: msg})
-	if d := deliveryFrom(r.Context()); d != nil {
-		ctx = context.WithValue(ctx, inboxDeliveryKey{}, d)
-	}
 	go s.runConversationTurn(ctx, cancel, c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }
@@ -536,6 +557,7 @@ func (s *Server) conversationRunContext(id int64, busyKey string, deliveryCtx ..
 func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelCauseFunc, c *db.Conversation, msg, busyKey string) {
 	runErr := fmt.Errorf("conversation turn did not start")
 	defer func() {
+		s.finishSessionRun(ctx, runErr)
 		finishInboxRun(ctx, runErr)
 		cancel(agent.AbortChatTurnFinished)
 		s.chatMu.Lock()
@@ -544,6 +566,14 @@ func (s *Server) runConversationTurn(ctx context.Context, cancel context.CancelC
 		s.chatMu.Unlock()
 		s.wakeInbox()
 	}()
+	if sessionTracker(ctx) == nil {
+		var e error
+		ctx, e = s.startSessionRun(ctx, busyKey, 0, c.ID, false)
+		if e != nil {
+			runErr = e
+			return
+		}
+	}
 	// Only the first turn executes a historical retest. Follow-up conversation
 	// turns may explain the sealed result; the result tool refuses to overwrite it.
 	finishStatus, finishReason := "failed", "复测未能启动"

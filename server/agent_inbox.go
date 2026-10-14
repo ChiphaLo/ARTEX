@@ -113,7 +113,7 @@ func (s *Server) attachLiveInbox(ctx context.Context, scope, worker, baseDir str
 	background := intercept.CurrentReviewBackground(ctx)
 	ctx = intercept.WithReviewBackgroundFunc(ctx, func() intercept.ReviewBackground { mu.Lock(); defer mu.Unlock(); return background })
 	return agent.WithLiveMessages(ctx, func(callCtx context.Context) []llm.Message {
-		items, err := s.m.pg.DrainAgentSteers(callCtx, scope)
+		items, err := s.m.pg.DrainAgentSteers(callCtx, scope, sessionRunID(ctx))
 		if err != nil {
 			if callCtx.Err() == nil {
 				log.Printf("[agent-inbox] steer drain: %v", err)
@@ -176,13 +176,23 @@ func (s *Server) pumpAgentInbox() {
 		}
 		key := s.convBusyKey(item.ConversationID)
 		if item.TaskID > 0 {
-			key = strconv.FormatInt(item.TaskID, 10)
-			t, ok := s.m.Task(key)
-			if !ok || s.engine.IsDeleting(key) {
+			taskKey := strconv.FormatInt(item.TaskID, 10)
+			key = taskKey
+			if strings.HasPrefix(item.Scope, "planner:") {
+				key = plannerBusyKey(taskKey)
+				if s.engine.plannerBusy(taskKey) {
+					continue
+				}
+			}
+			t, ok := s.m.Task(taskKey)
+			if !ok || s.engine.IsDeleting(strconv.FormatInt(item.TaskID, 10)) {
 				continue
 			}
 			life := t.lifecycleSnapshot()
-			if life.Paused || life.Queued || s.engine.IsPaused(key) {
+			if strings.HasPrefix(item.Scope, "planner:") && (s.engine.isSettling(t.ID) || !s.taskRuntimeAvailable(t, "planner")) {
+				continue
+			}
+			if life.Paused || life.Queued || s.engine.IsPaused(strconv.FormatInt(item.TaskID, 10)) {
 				continue
 			}
 		}
@@ -194,13 +204,13 @@ func (s *Server) pumpAgentInbox() {
 		}
 		s.chatMu.Lock()
 		if item.TaskID > 0 {
-			t, ok := s.m.Task(key)
-			if !ok || s.engine.IsDeleting(key) {
+			t, ok := s.m.Task(strconv.FormatInt(item.TaskID, 10))
+			if !ok || s.engine.IsDeleting(strconv.FormatInt(item.TaskID, 10)) {
 				s.chatMu.Unlock()
 				continue
 			}
 			life := t.lifecycleSnapshot()
-			if life.Paused || life.Queued || s.engine.IsPaused(key) {
+			if life.Paused || life.Queued || s.engine.IsPaused(strconv.FormatInt(item.TaskID, 10)) {
 				s.chatMu.Unlock()
 				continue
 			}
@@ -263,11 +273,18 @@ func (s *Server) deliverInbox(ctx context.Context, cancel context.CancelCauseFun
 	req := httptest.NewRequest(http.MethodPost, "/api/chat?task="+strconv.FormatInt(item.TaskID, 10), bytes.NewReader(body))
 	req = req.WithContext(context.WithValue(ctx, inboxDeliveryKey{}, delivery))
 	rec := httptest.NewRecorder()
-	if item.TaskID > 0 {
+	if strings.HasPrefix(item.Scope, "planner:") {
+		req.SetPathValue("id", strconv.FormatInt(item.TaskID, 10))
+		s.sendPlannerMessage(rec, req)
+	} else if item.TaskID > 0 {
 		s.chat(rec, req)
 	} else {
 		req.SetPathValue("id", strconv.FormatInt(item.ConversationID, 10))
 		s.pgSendConversationMessage(rec, req)
+	}
+	if strings.HasPrefix(item.Scope, "planner:") && rec.Code == 409 && ctx.Err() == nil {
+		s.m.pg.ReleaseAgentMessage(item.ID)
+		return
 	}
 	state := "failed"
 	if ctx.Err() != nil {
@@ -285,14 +302,20 @@ func (s *Server) deliverInbox(ctx context.Context, cancel context.CancelCauseFun
 	}
 	if rec.Code >= 400 && ctx.Err() == nil {
 		// A configuration/deletion race must not silently eat the human message.
-		a := userActivityWithAttachments("mainagent", p.Message, p.Attachments)
+		worker := "mainagent"
+		if strings.HasPrefix(item.Scope, "planner:") {
+			worker = "planner"
+		}
+		a := userActivityWithAttachments(worker, p.Message, p.Attachments)
 		inboxMetadata(&a, item.Mode, item.ID)
-		failure := db.Activity{Worker: "mainagent", Kind: "text", IsError: true, Summary: fmt.Sprintf("（待处理消息 #%d 未能启动，请检查 Agent 配置后重新发送）", item.ID)}
+		failure := db.Activity{Worker: worker, Kind: "text", IsError: true, Summary: fmt.Sprintf("（待处理消息 #%d 未能启动，请检查 Agent 配置后重新发送）", item.ID)}
 		if item.TaskID > 0 {
-			if t, ok := s.m.Task(key); ok && !s.engine.IsDeleting(key) {
+			if t, ok := s.m.Task(strconv.FormatInt(item.TaskID, 10)); ok && !s.engine.IsDeleting(strconv.FormatInt(item.TaskID, 10)) {
 				seg := item.MainSeg
-				a.MainSeg = &seg
-				failure.MainSeg = &seg
+				if worker == "mainagent" {
+					a.MainSeg = &seg
+					failure.MainSeg = &seg
+				}
 				s.engine.emitActivity(t, a)
 				s.engine.emitActivity(t, failure)
 			}
@@ -331,7 +354,11 @@ func (s *Server) agentInboxAPI(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		scope = mainInboxScope(t.ID, seg)
+		if strings.Contains(r.URL.Path, "/planner/inbox") {
+			scope = plannerScope(t.ID)
+		} else {
+			scope = mainInboxScope(t.ID, seg)
+		}
 	} else {
 		_, c, ok := s.convByID(w, r)
 		if !ok {

@@ -155,6 +155,16 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		provByProfile:  map[int64]*provEntry{}, llmHealth: newLLMHealthRegistry(m.pg),
 		taskAgents: map[string]*taskAgentBundle{}, archiveWake: make(chan struct{}, 1), mainBatchWake: make(chan struct{}, 1), inboxWake: make(chan struct{}, 1), inboxDispatching: map[string]bool{}}
 	s.engine.onIntentSettled = s.wakeMainWorkerBatches
+	s.engine.plannerRun = s.runScheduledPlanner
+	s.engine.plannerHeld = s.plannerHeld
+	if m.pg != nil {
+		if err := m.pg.RecoverAgentRuns(); err != nil {
+			log.Printf("[agent-session] recovery: %v", err)
+		}
+		if err := m.pg.RecoverAgentInbox(); err != nil {
+			log.Printf("[agent-inbox] recovery: %v", err)
+		}
+	}
 	s.initSideQuestions()
 	// 熔断阈值/冷却是失败路径上的热参数，启动时把全局重试策略推给 Registry 一次；
 	// 之后每次保存策略再推一次（saveLLMRetryPolicy）。
@@ -261,9 +271,6 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 	if m.pg != nil {
 		if err := m.pg.RecoverMainWorkerBatches(); err != nil {
 			log.Printf("[main-worker-batch] recovery: %v", err)
-		}
-		if err := m.pg.RecoverAgentInbox(); err != nil {
-			log.Printf("[agent-inbox] recovery: %v", err)
 		}
 		go s.runAgentInbox()
 		go s.runMainWorkerBatches()
@@ -831,6 +838,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
 	mux.HandleFunc("GET /api/tasks/{id}/chat/status", s.taskChatStatus)
 	mux.HandleFunc("POST /api/tasks/{id}/chat/stop", s.stopChat)
+	mux.HandleFunc("GET /api/tasks/{id}/chat/run", s.agentRunStatus)
+	mux.HandleFunc("POST /api/tasks/{id}/chat/continue", s.continueAgentRun)
+	mux.HandleFunc("GET /api/tasks/{id}/planner/run", s.agentRunStatus)
+	mux.HandleFunc("POST /api/tasks/{id}/planner/continue", s.continueAgentRun)
+	mux.HandleFunc("POST /api/tasks/{id}/planner/messages", s.sendPlannerMessage)
+	mux.HandleFunc("POST /api/tasks/{id}/planner/stop", s.stopPlanner)
+	mux.HandleFunc("GET /api/tasks/{id}/planner/inbox", s.agentInboxAPI)
+	mux.HandleFunc("PATCH /api/tasks/{id}/planner/inbox/{mid}", s.agentInboxAPI)
+	mux.HandleFunc("DELETE /api/tasks/{id}/planner/inbox/{mid}", s.agentInboxAPI)
+	mux.HandleFunc("PUT /api/tasks/{id}/planner/inbox/order", s.agentInboxAPI)
 	mux.HandleFunc("GET /api/tasks/{id}/chat/inbox", s.agentInboxAPI)
 	mux.HandleFunc("PATCH /api/tasks/{id}/chat/inbox/{mid}", s.agentInboxAPI)
 	mux.HandleFunc("DELETE /api/tasks/{id}/chat/inbox/{mid}", s.agentInboxAPI)
@@ -849,6 +866,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/conversations/{id}/messages", s.pgConversationMessages)
 	mux.HandleFunc("POST /api/conversations/{id}/messages", s.pgSendConversationMessage)
 	mux.HandleFunc("POST /api/conversations/{id}/stop", s.pgStopConversation)
+	mux.HandleFunc("GET /api/conversations/{id}/run", s.agentRunStatus)
+	mux.HandleFunc("POST /api/conversations/{id}/continue", s.continueAgentRun)
 	mux.HandleFunc("GET /api/conversations/{id}/inbox", s.agentInboxAPI)
 	mux.HandleFunc("PATCH /api/conversations/{id}/inbox/{mid}", s.agentInboxAPI)
 	mux.HandleFunc("DELETE /api/conversations/{id}/inbox/{mid}", s.agentInboxAPI)
@@ -3712,8 +3731,11 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		}
 		mainSeg, _ = t.Store.CurrentMainSeg()
 	}
+	control := resumeControl(r.Context())
 	agentMessage := ""
-	if d := deliveryFrom(r.Context()); d != nil {
+	if control != nil {
+		agentMessage = s.continuationInput(mainInboxScope(t.ID, mainSeg), t, 0, mainSeg)
+	} else if d := deliveryFrom(r.Context()); d != nil {
 		agentMessage = d.payload.AgentMessage
 	} else {
 		var ok bool
@@ -3755,6 +3777,23 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		ctx = context.WithValue(ctx, inboxDeliveryKey{}, d)
 	}
 	ctx = intercept.WithReviewContext(ctx, "", intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: req.Message})
+	if control != nil {
+		ctx = bindResume(ctx, control)
+		if control.ReadOnly {
+			var budgetCancel context.CancelFunc
+			ctx, budgetCancel = context.WithTimeout(ctx, 2*time.Minute)
+			baseCancel := cancel
+			cancel = func(cause error) { baseCancel(cause); budgetCancel() }
+		}
+	}
+	var startErr error
+	ctx, startErr = s.startSessionRun(ctx, mainInboxScope(t.ID, mainSeg), taskNumericID(t.ID), 0, control != nil && control.ReadOnly)
+	if startErr != nil {
+		cancel(agent.AbortChatTurnFinished)
+		s.chatMu.Unlock()
+		sessionRunError(w, startErr)
+		return
+	}
 	s.chatBusy[t.ID] = true
 	s.chatCancel[t.ID] = cancel
 	s.chatMu.Unlock()
@@ -3771,6 +3810,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	// attachments, the activity's Detail carries {text, attachments} so the transcript
 	// renders attachment cards.
 	humanTurn := userActivityWithAttachments("mainagent", req.Message, req.Attachments)
+	if control != nil {
+		humanTurn = resumeActivity("mainagent", control.ID)
+	}
 	humanTurn.MainSeg = segPtr
 	if d := deliveryFrom(ctx); d != nil {
 		inboxMetadata(&humanTurn, d.item.Mode, d.item.ID)
@@ -3779,6 +3821,13 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	var ma *agent.MainAgent
 	if s.taskRuntimeAvailable(t, "mainagent") {
 		ma = s.agentsForTask(t).main
+	}
+	if ma == nil && control != nil {
+		err := fmt.Errorf("主 Agent 模型不可用")
+		s.finishSessionRun(ctx, err)
+		s.finishTaskChat(t.ID, cancel)
+		writeErr(w, 503, err.Error())
+		return
 	}
 	if ma != nil {
 		// Run the agent on a per-turn cancellable ctx (NOT r.Context()): the turn can
@@ -3789,6 +3838,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		go func() {
 			var runErr error
 			defer func() {
+				s.finishSessionRun(ctx, runErr)
 				finishInboxRun(ctx, runErr)
 				s.finishTaskChat(t.ID, cancel)
 			}()
@@ -3827,6 +3877,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 	}
 	reply := s.fallbackChat(t, req.Message)
 	s.engine.emitActivity(t, db.Activity{Worker: "mainagent", Kind: "text", Summary: reply, MainSeg: segPtr})
+	s.finishSessionRun(ctx, nil)
 	finishInboxRun(ctx, nil)
 	s.finishTaskChat(t.ID, cancel)
 	writeJSON(w, 200, map[string]any{"reply": reply, "mode": "rule"})

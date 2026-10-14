@@ -23,6 +23,7 @@ import {
 import { toast } from "sonner";
 
 import { AgentInbox, useInboxRequestID } from "@/components/agent-inbox";
+import { AgentContinueButton } from "@/components/agent-run-controls";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
@@ -870,6 +871,7 @@ function ChatView({
         </div>
       </ScrollArea>
 
+      <AgentContinueButton base={`/conversations/${conv.id}`} onStarted={() => setRunning(true)} />
       <AgentInbox base={`/conversations/${conv.id}/inbox`} refreshKey={inboxRefresh} />
       <Composer
         value={input}
