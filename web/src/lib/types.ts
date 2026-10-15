@@ -1589,6 +1589,8 @@ export interface UpdateCheck {
   rolled_back?: boolean;
   /** 查询 GitHub 失败时给出原因，此时下面的字段都不会有。 */
   error?: string;
+  /** 更新源尚未发布正式版本，不是网络错误。 */
+  no_release?: boolean;
   latest?: string;
   notes?: string;
   html_url?: string;

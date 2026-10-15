@@ -96,6 +96,7 @@ export default function SetupPage() {
                 <Label htmlFor="password">新密码</Label>
                 <Input
                   id="password"
+                  name="new-password"
                   type="password"
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
@@ -108,6 +109,7 @@ export default function SetupPage() {
                 <Label htmlFor="confirm">确认密码</Label>
                 <Input
                   id="confirm"
+                  name="confirm-password"
                   type="password"
                   value={confirm}
                   onChange={(e) => setConfirm(e.target.value)}

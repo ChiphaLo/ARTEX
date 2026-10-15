@@ -3,6 +3,7 @@
 import { CheckIcon } from "lucide-react";
 
 import { Input } from "@/components/ui/input";
+import { SecretInput } from "@/components/ui/secret-input";
 import { Label } from "@/components/ui/label";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
@@ -22,8 +23,7 @@ function asText(v: unknown): string {
 }
 
 // inputType 把字段类型映射到 input 的 type 属性。
-function inputType(kind: FieldKind): "text" | "password" | "number" {
-  if (kind === "password") return "password";
+function inputType(kind: FieldKind): "text" | "number" {
   if (kind === "number") return "number";
   return "text";
 }
@@ -102,6 +102,17 @@ export function ConfigField({
           value={Array.isArray(value) ? (value as string[]).join(", ") : raw}
           onChange={(e) => onChange(e.target.value)}
           placeholder={def.placeholder}
+        />
+      );
+    }
+    if (def.kind === "password" || isSecret) {
+      return (
+        <SecretInput
+          id={id}
+          name={`artex-notification-${def.key}`}
+          placeholder={def.placeholder}
+          value={masked ? "" : raw}
+          onChange={(e) => onChange(e.target.value)}
         />
       );
     }

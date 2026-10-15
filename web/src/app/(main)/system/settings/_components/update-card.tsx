@@ -55,6 +55,7 @@ export function UpdateCard() {
         setInfo(r);
         if (!quiet) {
           if (r.error) toast.error("检查更新失败：" + r.error);
+          else if (r.no_release) toast.info(r.reason || "更新源尚未发布正式版本");
           else if (r.has_update) toast.success(`发现新版本 ${r.latest}`);
           else if (r.comparable) toast.success("当前已是最新版本");
         }
@@ -237,7 +238,7 @@ export function UpdateCard() {
         {info?.error && (
           <p className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 p-2 text-xs text-destructive">
             <TriangleAlertIcon className="mt-0.5 size-3.5 shrink-0" />
-            无法连接 GitHub：{info.error}
+            检查更新失败：{info.error}
             {"　"}可在上方配置全局代理后重试。
           </p>
         )}

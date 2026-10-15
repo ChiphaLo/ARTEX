@@ -968,6 +968,12 @@ const ConversationItem = React.memo(function ConversationItem({
       )}
       {renaming ? (
         <input
+          type="text"
+          name="artex-conversation-title"
+          autoComplete="off"
+          data-lpignore="true"
+          data-1p-ignore="true"
+          data-bwignore="true"
           ref={renameInputRef}
           value={renameText}
           onChange={(e) => onRenameText(e.target.value)}

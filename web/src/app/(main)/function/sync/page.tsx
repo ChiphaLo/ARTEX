@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
+import { SecretInput } from "@/components/ui/secret-input";
 import { Label } from "@/components/ui/label";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -171,9 +172,9 @@ function DataSourceCard({
                 <Input placeholder="http://<主机>:8082/mcp" value={url} onChange={(e) => setUrl(e.target.value)} />
               </div>
               <div className="space-y-1.5">
-                <Label>API Key（X-API-Key，留空保留原值）</Label>
-                <Input
-                  type="password"
+                <Label htmlFor="ss-service-key">API Key（X-API-Key，留空保留原值）</Label>
+                <SecretInput
+                  id="ss-service-key"
                   placeholder="ssk_..."
                   value={apiKey}
                   onChange={(e) => setApiKey(e.target.value)}

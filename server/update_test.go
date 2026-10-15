@@ -2,13 +2,49 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/Autumn-27/artex/selfupdate"
 )
+
+func TestUpdateCheckNoReleaseIsInformational(t *testing.T) {
+	previous := relCache
+	t.Cleanup(func() { relCache = previous })
+	for _, tc := range []struct {
+		name          string
+		err           error
+		informational bool
+	}{
+		{"empty channel", selfupdate.ErrNoRelease, true},
+		{"network error", errors.New("synthetic network failure"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			relCache = newTestCache(func(context.Context, *http.Client) (*selfupdate.Release, error) { return nil, tc.err })
+			s := &Server{m: &Manager{}}
+			w := httptest.NewRecorder()
+			s.updateCheck(w, httptest.NewRequest(http.MethodGet, "/api/update/check", nil))
+			var out map[string]any
+			if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+				t.Fatal(err)
+			}
+			if w.Code != http.StatusOK || out["repo"] != "ChiphaLo/ARTEX" {
+				t.Fatalf("response: %s", w.Body.String())
+			}
+			if tc.informational {
+				if out["no_release"] != true || out["has_update"] != false || out["error"] != nil || out["reason"] == nil {
+					t.Fatalf("response: %s", w.Body.String())
+				}
+			} else if out["error"] == nil || out["no_release"] == true {
+				t.Fatalf("response: %s", w.Body.String())
+			}
+		})
+	}
+}
 
 // releaseCache 是保护 GitHub 配额的那一层：未认证的 API 只有 60 次/小时/IP，
 // 而顶栏的"有新版本"提示每次整页加载都会查一次。缓存一旦失效，用户多开几个

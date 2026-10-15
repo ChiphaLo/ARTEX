@@ -74,6 +74,7 @@ export function ChangePasswordDialog({
               <Label htmlFor="cp-old">当前密码</Label>
               <Input
                 id="cp-old"
+                name="current-password"
                 type="password"
                 autoComplete="current-password"
                 value={oldPassword}
@@ -85,6 +86,7 @@ export function ChangePasswordDialog({
               <Label htmlFor="cp-new">新密码</Label>
               <Input
                 id="cp-new"
+                name="new-password"
                 type="password"
                 autoComplete="new-password"
                 value={newPassword}
@@ -96,6 +98,7 @@ export function ChangePasswordDialog({
               <Label htmlFor="cp-confirm">确认新密码</Label>
               <Input
                 id="cp-confirm"
+                name="confirm-password"
                 type="password"
                 autoComplete="new-password"
                 value={confirmPassword}

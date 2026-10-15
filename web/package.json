@@ -3,6 +3,7 @@
   "version": "2.2.0",
   "private": true,
   "scripts": {
+    "test:inputs": "node --test tests/input-semantics.test.cjs",
     "dev": "next dev",
     "build": "next build",
     "build:static": "NEXT_EXPORT=1 next build",

@@ -5,6 +5,10 @@ import { cn } from "@/lib/utils"
 function Textarea({ className, ...props }: React.ComponentProps<"textarea">) {
   return (
     <textarea
+      autoComplete="off"
+      data-lpignore="true"
+      data-1p-ignore="true"
+      data-bwignore="true"
       data-slot="textarea"
       className={cn(
         // field-sizing-content auto-grows the textarea to its content; cap the

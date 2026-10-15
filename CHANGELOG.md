@@ -21,6 +21,9 @@
 
 ### 修复的问题
 
+- **更新源更正**：一键更新固定使用 `ChiphaLo/ARTEX` 的正式 Release，未发布版本时显示正常说明，不再误报网络错误；保留版本比较、HTTPS、SHA256 校验和非正式构建禁用覆盖保护。
+- **服务密钥误填**：LLM、Brave/Tavily、资产同步与通知渠道统一使用独立的掩码文本密钥控件，避免 Chrome 将 ARTEX 登录密码填入 API Key。普通输入框默认关闭自动填充；登录/初始化/改密保留正确的 username/current-password/new-password 标记。
+
 - **Windows 原生兼容**：证据保存不再对 Windows 只读目录句柄执行不支持的 fsync（保留正文 fsync/同卷 atomic rename）；Skill 文件相对路径统一为斜线。隔离 LLM 计量测试自行初始化用量表。
 - **受限容器 Nmap 启动**：清除上游 Nmap 的文件 capability，避免默认禁用 NET_ADMIN 时 exec 被拒绝；仍保留 no-new-privileges 与容器 NET_RAW，不授予 NET_ADMIN。验收脚本等待 Gateway 与 Metasploit RPC 就绪。
 - **修复 Responses 流式工具参数串线**：按工具调用的 `item_id` 关联参数增量与结束事件，支持交错、并行的工具调用；缺失或损坏的增量可回退到结束事件中的完整参数，避免多份 JSON 被拼到同一个工具调用。统一消息累积器与流式工具执行路径，并保持 Anthropic、Chat Completions 的索引关联兼容。

@@ -229,6 +229,14 @@ func (s *Server) updateCheck(w http.ResponseWriter, r *http.Request) {
 	force := r.URL.Query().Get("force") != ""
 	client := selfupdate.NewClient(s.m.GlobalProxy())
 	rel, err := relCache.get(r.Context(), client, force)
+	if errors.Is(err, selfupdate.ErrNoRelease) {
+		out["no_release"] = true
+		out["has_update"] = false
+		out["comparable"] = false
+		out["reason"] = fmt.Sprintf("更新源 %s 尚无可用的正式发布版本；请等待发布包含本平台程序与 SHA256SUMS 的 Release。当前本地程序可继续使用。", selfupdate.Repo)
+		writeJSON(w, 200, out)
+		return
+	}
 	if err != nil {
 		out["error"] = err.Error()
 		writeJSON(w, 200, out)
