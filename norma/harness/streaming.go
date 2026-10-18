@@ -248,3 +248,13 @@ func (e *streamExec) count() int {
 	defer e.mu.Unlock()
 	return len(e.tools)
 }
+
+func (e *streamExec) executedCalls() []llm.ContentBlock {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	out := make([]llm.ContentBlock, 0, len(e.tools))
+	for _, t := range e.tools {
+		out = append(out, t.block)
+	}
+	return out
+}

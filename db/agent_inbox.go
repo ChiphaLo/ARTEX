@@ -192,13 +192,20 @@ func (d *DB) CancelAgentMessage(scope string, id int64) (bool, error) {
 	}
 	return n == 1, tx.Commit()
 }
-func (d *DB) EditAgentMessage(scope string, id int64, revision int, payload []byte) error {
+func (d *DB) EditAgentMessage(scope string, id int64, revision int, payload []byte, modes ...string) error {
+	mode := "queue"
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	if mode != "queue" && mode != "steer" {
+		return fmt.Errorf("invalid inbox mode")
+	}
 	tx, err := d.inboxTx(context.Background(), scope)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
-	r, err := tx.Exec(`UPDATE agent_inbox SET payload=$4,revision=revision+1 WHERE scope_key=$1 AND id=$2 AND revision=$3 AND mode='queue' AND state='pending'`, scope, id, revision, string(payload))
+	r, err := tx.Exec(`UPDATE agent_inbox SET payload=$4,mode=$5,revision=revision+1 WHERE scope_key=$1 AND id=$2 AND revision=$3 AND mode='queue' AND state='pending'`, scope, id, revision, string(payload), mode)
 	if err != nil {
 		return err
 	}

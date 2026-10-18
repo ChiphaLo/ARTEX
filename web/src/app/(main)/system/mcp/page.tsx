@@ -12,13 +12,7 @@ import { Badge } from "@/components/ui/badge";
 import { Switch } from "@/components/ui/switch";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import {
-  Sheet,
-  SheetContent,
-  SheetHeader,
-  SheetTitle,
-  SheetDescription,
-} from "@/components/ui/sheet";
+import { Sheet, SheetContent, SheetHeader, SheetTitle, SheetDescription } from "@/components/ui/sheet";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { api } from "@/lib/api";
 import type { MCPServer, MCPTool, Agent } from "@/lib/types";
@@ -60,7 +54,10 @@ export default function MCPPage() {
   const [refreshing, setRefreshing] = React.useState(false);
 
   const load = React.useCallback(() => {
-    api.agents().then(setAgents).catch(() => {});
+    api
+      .agents()
+      .then(setAgents)
+      .catch(() => {});
     api
       .mcpServers()
       .then((ss) => {
@@ -305,16 +302,19 @@ export default function MCPPage() {
               onChange={(e) => setF({ url: e.target.value })}
             />
             <label className="flex items-center gap-2 text-sm">
-              <Checkbox
-                checked={form.insecure}
-                onCheckedChange={(v) => setF({ insecure: v === true })}
-              />
+              <Checkbox checked={form.insecure} onCheckedChange={(v) => setF({ insecure: v === true })} />
               跳过 TLS 证书校验（自签证书）
             </label>
-              <Label htmlFor="m-ca">专用 CA 证书（推荐，ARTEX 内的 PEM 文件路径）</Label>
-              <Input id="m-ca" value={form.ca_cert} onChange={(e) => setF({ ca_cert: e.target.value })}
-                placeholder="/run/secrets/kali-mcp/service_ca.crt" />
-              <p className="text-xs text-muted-foreground">可用 {"${env:KALI_MCP_CA_CERT}"} 引用。只对本连接生效；Kali 不允许跳过 TLS 校验。</p>
+            <Label htmlFor="m-ca">专用 CA 证书（推荐，ARTEX 内的 PEM 文件路径）</Label>
+            <Input
+              id="m-ca"
+              value={form.ca_cert}
+              onChange={(e) => setF({ ca_cert: e.target.value })}
+              placeholder="/run/secrets/external-mcp/ca.crt"
+            />
+            <p className="text-xs text-muted-foreground">
+              可用 {"${env:MCP_CA_CERT}"} 引用。只对本连接生效；推荐保持 TLS 证书校验。
+            </p>
           </div>
         )}
         <div className="grid gap-2">
@@ -326,9 +326,7 @@ export default function MCPPage() {
           <Textarea
             id="m-env"
             className="font-mono"
-            placeholder={
-              form.transport !== "stdio" ? "Authorization=Bearer xxxx" : "API_KEY=xxxx\nFOO=bar"
-            }
+            placeholder={form.transport !== "stdio" ? "Authorization=Bearer xxxx" : "API_KEY=xxxx\nFOO=bar"}
             value={form.env}
             onChange={(e) => setF({ env: e.target.value })}
           />
@@ -356,9 +354,7 @@ export default function MCPPage() {
               <div key={t.name} className="py-2.5">
                 <code className="font-mono text-sm">{t.name}</code>
                 {t.description && (
-                  <p className="text-muted-foreground mt-0.5 text-xs leading-relaxed">
-                    {t.description}
-                  </p>
+                  <p className="text-muted-foreground mt-0.5 text-xs leading-relaxed">{t.description}</p>
                 )}
               </div>
             ))}
@@ -399,17 +395,8 @@ export default function MCPPage() {
                   {s.transport}
                 </Badge>
                 <div className="ml-auto flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
-                  <Switch
-                    checked={s.enabled}
-                    onCheckedChange={() => toggleEnabled(s)}
-                    aria-label="启用"
-                  />
-                  <Button
-                    size="icon"
-                    variant="outline"
-                    aria-label="删除"
-                    onClick={() => removeServer(s)}
-                  >
+                  <Switch checked={s.enabled} onCheckedChange={() => toggleEnabled(s)} aria-label="启用" />
+                  <Button size="icon" variant="outline" aria-label="删除" onClick={() => removeServer(s)}>
                     <Trash2Icon className="text-destructive" />
                   </Button>
                 </div>
@@ -439,15 +426,10 @@ export default function MCPPage() {
       </div>
 
       <Sheet open={open} onOpenChange={setOpen}>
-        <SheetContent
-          side="right"
-          className="w-full data-[side=right]:sm:max-w-lg"
-        >
+        <SheetContent side="right" className="w-full data-[side=right]:sm:max-w-lg">
           <SheetHeader>
             <SheetTitle>{editing ? editing.name : "添加 MCP 服务器"}</SheetTitle>
-            <SheetDescription>
-              stdio（本地起进程）或 http（远程 Streamable HTTP）
-            </SheetDescription>
+            <SheetDescription>stdio（本地起进程）或 http（远程 Streamable HTTP）</SheetDescription>
           </SheetHeader>
 
           {editing ? (
@@ -458,9 +440,7 @@ export default function MCPPage() {
             >
               <TabsList>
                 <TabsTrigger value="config">配置</TabsTrigger>
-                <TabsTrigger value="tools">
-                  工具列表{tools.length ? `（${tools.length}）` : ""}
-                </TabsTrigger>
+                <TabsTrigger value="tools">工具列表{tools.length ? `（${tools.length}）` : ""}</TabsTrigger>
               </TabsList>
               <TabsContent value="config" className="min-h-0 flex-1 overflow-y-auto">
                 {renderForm()}

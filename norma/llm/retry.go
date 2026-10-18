@@ -25,6 +25,9 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 		return nil, err
 	}
 	retries := cfg.retries()
+	if externalRetry(ctx) {
+		retries = 0
+	}
 	for attempt := 0; ; attempt++ {
 		req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 		if err != nil {

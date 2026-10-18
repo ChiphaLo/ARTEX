@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/Autumn-27/artex/db"
@@ -23,17 +22,6 @@ type mcpClient interface {
 
 // connectMCP dials one MCP server per its transport. Callers must Close the client.
 func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
-	if m.Name == kaliMCPName {
-		if !m.Enabled {
-			return nil, fmt.Errorf("Kali MCP server is disabled by administrator")
-		}
-		if !kaliMCPEnabled() {
-			return nil, fmt.Errorf("Kali MCP integration is disabled (KALI_MCP_ENABLED)")
-		}
-		if m.Transport != "http" || m.Insecure || !strings.HasPrefix(m.URL, "https://") {
-			return nil, fmt.Errorf("Kali MCP requires verified HTTPS Streamable HTTP")
-		}
-	}
 	switch m.Transport {
 	case "stdio":
 		if m.Command == "" {
@@ -45,11 +33,6 @@ func connectMCP(ctx context.Context, m *db.MCPServer) (mcpClient, error) {
 			return nil, fmt.Errorf("http 传输缺少 URL")
 		}
 		// env map doubles as HTTP headers (e.g. Authorization).
-		if m.Name == kaliMCPName {
-			initCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-			defer cancel()
-			return mcphttp.NewWithOptions(initCtx, m.Name, m.URL, jsonStrMap(m.Env), mcphttp.Options{CACert: m.CACert})
-		}
 		return mcphttp.NewWithOptions(ctx, m.Name, m.URL, jsonStrMap(m.Env), mcphttp.Options{Insecure: m.Insecure, CACert: m.CACert})
 	case "sse":
 		if m.URL == "" {
@@ -98,9 +81,6 @@ func (s *Server) discoverEmptyMCPsOnStartup() {
 		if !m.Enabled || len(m.Tools) > 0 {
 			continue
 		}
-		if m.Name == kaliMCPName {
-			continue
-		} // independently retried
 		ctx, cancel := context.WithTimeout(s.ctx, 90*time.Second)
 		if err := s.discoverAndCacheMCP(ctx, m); err != nil {
 			log.Printf("[mcp] 启动自动发现 %s 失败: %v", m.Name, err)

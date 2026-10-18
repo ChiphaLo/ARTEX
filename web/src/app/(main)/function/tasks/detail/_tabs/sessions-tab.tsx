@@ -538,6 +538,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [inboxRefresh, setInboxRefresh] = React.useState(0);
   const [stopping, setStopping] = React.useState(false);
   const [mainChatRunning, setMainChatRunning] = React.useState<boolean | null>(null);
+  const [plannerRunning, setPlannerRunning] = React.useState(false);
   const [controllingIntent, setControllingIntent] = React.useState<string | null>(null);
   const [cancelIntent, setCancelIntent] = React.useState<Session | null>(null);
   const [cancelReason, setCancelReason] = React.useState("");
@@ -813,8 +814,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       const request = ++chatStatusRequestRef.current;
       return api
         .chatStatus(taskId)
-        .then(({ running }) => {
-          if (alive && chatStatusRequestRef.current === request) setMainChatRunning(running);
+        .then(({ running, planner_running }) => {
+          if (alive && chatStatusRequestRef.current === request) {
+            setMainChatRunning(running);
+            setPlannerRunning(planner_running ?? false);
+          }
         })
         .catch(() => {
           // Keep the last authoritative value. Before the first success, recent
@@ -1207,13 +1211,12 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     [store],
   );
   const currentMainKey = mainSessionKey(currentSeg);
-  const plannerLive = recentLive("plan");
+  const plannerLive = plannerRunning;
 
   // Which main segment is streaming RIGHT NOW. A main turn is serialized per task, so at
   // most one segment is live. Gate on the real running flag (sending / mainChatRunning)
-  // rather than "recent activity", and drop it the moment the turn's terminal record
-  // (kind='result', or an error) lands — otherwise the badge lingers for STREAM_WINDOW_MS
-  // after the agent already finished. null = nothing running.
+  // rather than "recent activity" or ordinary error/text rows. The backend owns the
+  // terminal state, including waiting/retrying/tool execution. null = nothing running.
   const liveMainSeg = React.useMemo<number | null>(() => {
     if (!(sending || mainChatRunning)) return null;
     // the streaming segment is the one with the freshest activity (incl. the just-sent turn)
@@ -1227,9 +1230,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
         seg = m.seq;
       }
     }
-    const items = store[mainSessionKey(seg)]?.items ?? [];
-    const last = items[items.length - 1];
-    if (last && (last.kind === "result" || (last.kind === "text" && last.is_error))) return null;
+    // Only the authoritative run state can stop the spinner; activity gaps/errors are not terminal.
     return seg;
   }, [sending, mainChatRunning, mainSegs, store, currentSeg]);
 
@@ -1277,14 +1278,10 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const activeKey = keyForSession(active);
   const activeState = store[activeKey];
   // A main turn is serialized per task (chat lock), so "busy" is task-wide: while any
-  // main segment is mid-turn the active composer is disabled. Clear it the moment the
-  // active session's terminal record (kind='result', or an error) lands, so the input
-  // re-enables immediately instead of waiting for the next chat-status poll.
+  // main segment is mid-turn the active composer is disabled. Only the authoritative
+  // status poll releases it; a temporary error row is not a completed run.
   const activeItems = activeState?.items ?? [];
-  const activeLast = activeItems[activeItems.length - 1];
-  const activeSettled =
-    !!activeLast && (activeLast.kind === "result" || (activeLast.kind === "text" && activeLast.is_error));
-  const mainBusy = isMain && (sending || (!activeSettled && (mainChatRunning ?? recentLive(activeKey))));
+  const mainBusy = isMain && (sending || (mainChatRunning ?? false));
   // 折叠态（手机端）标题栏要替代整张列表：显示当前会话名 + 其它会话的未读合计，
   // 否则收起后既不知道自己在看哪个会话，也看不到别处有新消息。
   const activeDisplayTitle = (active.role === "worker" ? sessionMeta.get(active.id)?.title : "") || active.title;

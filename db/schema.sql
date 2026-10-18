@@ -362,6 +362,7 @@ CREATE TABLE IF NOT EXISTS main_worker_batches (
     created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     finished_at    TIMESTAMPTZ
 );
+ALTER TABLE main_worker_batches ADD COLUMN IF NOT EXISTS dispatcher TEXT NOT NULL DEFAULT 'mainagent';
 CREATE INDEX IF NOT EXISTS idx_main_worker_batches_pending ON main_worker_batches(id)
     WHERE state = 'waiting';
 CREATE INDEX IF NOT EXISTS idx_intent_main_batch ON exploration_nodes(exploration_id, (payload->>'main_batch_id'))
@@ -423,6 +424,7 @@ CREATE TABLE IF NOT EXISTS llm_profiles (
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+ALTER TABLE llm_profiles ADD COLUMN IF NOT EXISTS models JSONB NOT NULL DEFAULT '[]';
 CREATE UNIQUE INDEX IF NOT EXISTS uq_llm_one_default ON llm_profiles(is_default) WHERE is_default;
 DROP TRIGGER IF EXISTS trg_llm_upd ON llm_profiles;
 CREATE TRIGGER trg_llm_upd BEFORE UPDATE ON llm_profiles

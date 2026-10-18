@@ -12,23 +12,32 @@ type MainWorkerBatch struct {
 	ExplorationID int64
 	TaskID        int64
 	MainSeg       int
+	Dispatcher    string
 }
 
 // MainWorkerResult contains bounded conclusions, never a full worker trace.
 type MainWorkerResult struct {
 	IntentID int64  `json:"intent_id"`
+	Worker   string `json:"worker"`
 	State    string `json:"state"`
 	Summary  string `json:"summary"`
 	Output   string `json:"output"`
 	IsError  bool   `json:"is_error"`
 }
 
-func (s *ExplorationStore) BeginMainWorkerBatch(seg int) (int64, error) {
+func (s *ExplorationStore) BeginMainWorkerBatch(seg int, dispatchers ...string) (int64, error) {
 	if seg < 0 {
 		return 0, fmt.Errorf("invalid main segment")
 	}
+	dispatcher := "mainagent"
+	if len(dispatchers) > 0 {
+		dispatcher = dispatchers[0]
+	}
+	if dispatcher != "mainagent" && dispatcher != "planner" {
+		return 0, fmt.Errorf("invalid dispatcher")
+	}
 	var id int64
-	err := s.db.QueryRow(`INSERT INTO main_worker_batches(exploration_id,main_seg) VALUES ($1,$2) RETURNING id`, s.expID, seg).Scan(&id)
+	err := s.db.QueryRow(`INSERT INTO main_worker_batches(exploration_id,main_seg,dispatcher) VALUES ($1,$2,$3) RETURNING id`, s.expID, seg, dispatcher).Scan(&id)
 	return id, err
 }
 
@@ -73,11 +82,11 @@ AND NOT EXISTS (SELECT 1 FROM exploration_nodes n
 
 func (d *DB) ReadyMainWorkerBatches(limit int) ([]MainWorkerBatch, error) {
 	rows, err := d.Query(`WITH ready AS (
-SELECT b.id,b.exploration_id,t.id AS task_id,b.main_seg FROM main_worker_batches b
+SELECT b.id,b.exploration_id,t.id AS task_id,b.main_seg,b.dispatcher FROM main_worker_batches b
 JOIN tasks t ON t.exploration_id=b.exploration_id
 WHERE b.state='waiting' AND NOT t.paused AND NOT t.queued AND `+mainBatchReady+`
 ), heads AS (SELECT DISTINCT ON (exploration_id) * FROM ready ORDER BY exploration_id,id)
-SELECT id,exploration_id,task_id,main_seg FROM heads ORDER BY id LIMIT $1`, limit)
+SELECT id,exploration_id,task_id,main_seg,dispatcher FROM heads ORDER BY id LIMIT $1`, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +94,7 @@ SELECT id,exploration_id,task_id,main_seg FROM heads ORDER BY id LIMIT $1`, limi
 	var out []MainWorkerBatch
 	for rows.Next() {
 		var b MainWorkerBatch
-		if err := rows.Scan(&b.ID, &b.ExplorationID, &b.TaskID, &b.MainSeg); err != nil {
+		if err := rows.Scan(&b.ID, &b.ExplorationID, &b.TaskID, &b.MainSeg, &b.Dispatcher); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -133,9 +142,9 @@ AND payload->>'main_batch_id'=$2`, b.ExplorationID, key).Scan(&total); err != ni
 	// Prefer the LAST result, not the first 1,000 activities. Bound in SQL before
 	// loading large output; the caller also imposes a total prompt size bound.
 	rows, err := d.Query(`SELECT n.id,n.state,left(COALESCE(n.payload->>'summary',''),600),
-left(COALESCE(NULLIF(a.detail,''),a.summary,n.delete_reason,n.blocked_reason,''),2400),COALESCE(a.is_error,false)
+left(COALESCE(NULLIF(a.detail,''),a.summary,n.delete_reason,n.blocked_reason,''),2400),COALESCE(a.is_error,false),COALESCE(a.worker,'')
 FROM exploration_nodes n LEFT JOIN LATERAL (
- SELECT detail,summary,is_error FROM activity WHERE exploration_id=n.exploration_id AND node_id=n.id
+ SELECT detail,summary,is_error,worker FROM activity WHERE exploration_id=n.exploration_id AND node_id=n.id
  AND kind IN ('result','text') ORDER BY (kind='result') DESC,id DESC LIMIT 1
 ) a ON true WHERE n.exploration_id=$1 AND n.kind='intent' AND n.payload->>'main_batch_id'=$2
 ORDER BY n.id LIMIT 64`, b.ExplorationID, key)
@@ -146,10 +155,18 @@ ORDER BY n.id LIMIT 64`, b.ExplorationID, key)
 	var out []MainWorkerResult
 	for rows.Next() {
 		var r MainWorkerResult
-		if err := rows.Scan(&r.IntentID, &r.State, &r.Summary, &r.Output, &r.IsError); err != nil {
+		if err := rows.Scan(&r.IntentID, &r.State, &r.Summary, &r.Output, &r.IsError, &r.Worker); err != nil {
 			return nil, 0, err
 		}
 		out = append(out, r)
 	}
 	return out, total, rows.Err()
+}
+
+// MainWorkerBinding exposes only the immutable routing identity of this dispatch.
+func (s *ExplorationStore) MainWorkerBinding(id int64) (map[string]any, error) {
+	var seg int
+	var dispatcher string
+	err := s.db.QueryRow(`SELECT main_seg,dispatcher FROM main_worker_batches WHERE id=$1 AND exploration_id=$2`, id, s.expID).Scan(&seg, &dispatcher)
+	return map[string]any{"round_id": id, "main_seg": seg, "dispatcher": dispatcher}, err
 }

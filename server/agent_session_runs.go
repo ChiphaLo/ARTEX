@@ -89,6 +89,8 @@ func (s *Server) finishSessionRun(ctx context.Context, err error) {
 		state = "budget"
 	case reason == harness.ReasonAbortedTools || reason == harness.ReasonAbortedStreaming:
 		state = "interrupted"
+	case reason == "":
+		state = "interrupted" // no terminal schema observed; never infer completed from silence
 	}
 	if e := s.m.pg.FinishAgentRun(tracker.id, state); e != nil {
 		log.Printf("[agent-session] finish %d: %v", tracker.id, e)
@@ -231,14 +233,14 @@ func (s *Server) continuationInput(scope string, task *Task, convID int64, seg i
 	var rowsQuery string
 	var args []any
 	if convID > 0 {
-		rowsQuery = `SELECT kind,COALESCE(tool,''),COALESCE(detail,summary,'') FROM conversation_activities WHERE conversation_id=$1 AND kind IN ('tool_use','tool_result','result') ORDER BY id DESC LIMIT 12`
+		rowsQuery = `SELECT kind,COALESCE(tool,''),COALESCE(detail,summary,'') FROM conversation_activities WHERE conversation_id=$1 AND COALESCE(metadata->>'context_excluded','false')<>'true' AND kind IN ('tool_use','tool_result','result') ORDER BY id DESC LIMIT 12`
 		args = []any{convID}
 	} else {
 		worker := "mainagent"
 		if strings.HasPrefix(scope, "planner:") {
 			worker = "planner"
 		}
-		rowsQuery = `SELECT kind,COALESCE(tool,''),COALESCE(detail,summary,'') FROM activity WHERE exploration_id=$1 AND worker=$2 AND ($2='planner' OR COALESCE(main_seg,0)=$3) AND kind IN ('tool_use','tool_result','result') ORDER BY id DESC LIMIT 12`
+		rowsQuery = `SELECT kind,COALESCE(tool,''),COALESCE(detail,summary,'') FROM activity WHERE exploration_id=$1 AND worker=$2 AND ($2='planner' OR COALESCE(main_seg,0)=$3) AND COALESCE(metadata->>'context_excluded','false')<>'true' AND kind IN ('tool_use','tool_result','result') ORDER BY id DESC LIMIT 12`
 		args = []any{task.ExpID, worker, seg}
 	}
 	data := []map[string]string{}

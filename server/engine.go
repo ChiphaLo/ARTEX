@@ -64,12 +64,11 @@ func preview(s string, n int) string {
 	return string(r)
 }
 
-// model_error（provider/API 故障：LLM 层瞬时重试耗尽，或流已开始后中途断流）
-// 收场的 work 不是「试过没做完」也不是真失败，而是外部抖动。默认把它当永久
-// blocked 会白丢一条意图，所以这里对该终态额外重跑几次，每次之间退避一下，给
-// provider 恢复的时间；重试期间若被暂停/终止/取消则立即让位给对应分支处理。
+// Transient provider failures are retried inside the existing session. Replaying
+// a whole intent may duplicate side effects, so this outer layer is off by
+// default and only runs when an administrator explicitly configures it.
 const (
-	modelErrorRetries      = 2               // model_error 收场后额外重试的次数
+	modelErrorRetries      = 0               // same-session harness handles transient retries; never replay whole intent by default
 	modelErrorRetryBackoff = 3 * time.Second // 每次重试前的退避
 	workControlWaitTimeout = 30 * time.Second
 )

@@ -95,10 +95,6 @@ func wireAgentAugment(pg *db.DB, skillDir string, hostTools func() ([]actool.Cor
 					continue
 				}
 				for _, t := range ts {
-					if m.Name == kaliMCPName {
-						t = meterTool(t, pg, t.Name(), a.Key, agent.RunInfoFrom(ctx))
-						t = &kaliAuditedTool{CoreTool: t}
-					}
 					extra = append(extra, t)
 					allNames = append(allNames, t.Name())
 					serverTools[m.Name] = append(serverTools[m.Name], t.Name())
@@ -374,4 +370,9 @@ func jsonStrMap(raw json.RawMessage) map[string]string {
 		_ = json.Unmarshal(raw, &out)
 	}
 	return out
+}
+
+// External MCPs share one visibility policy; no reserved server names.
+func canUseMCP(m *db.MCPServer, direct, skillGated bool) bool {
+	return m.Enabled && (direct || skillGated)
 }

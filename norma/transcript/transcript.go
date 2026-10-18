@@ -27,6 +27,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -35,22 +37,39 @@ import (
 
 // Record is one line of a JSONL transcript.
 type Record struct {
-	UUID        string            `json:"uuid"`
-	ParentUUID  string            `json:"parent_uuid,omitempty"`
-	SessionID   string            `json:"session_id"`
-	AgentID     string            `json:"agent_id,omitempty"`
-	IsSidechain bool              `json:"is_sidechain,omitempty"`
-	Timestamp   string            `json:"timestamp"`
-	Type        string            `json:"type"` // "message" | "boundary"
-	Message     *llm.Message      `json:"message,omitempty"`
-	Usage       *llm.Usage        `json:"usage,omitempty"`    // assistant turns only
-	Boundary    *llm.BoundaryMeta `json:"boundary,omitempty"` // Type=="boundary"
+	BlockIDs         []string          `json:"block_ids,omitempty"`
+	ExcludedBlockIDs []string          `json:"excluded_block_ids,omitempty"`
+	UUID             string            `json:"uuid"`
+	ParentUUID       string            `json:"parent_uuid,omitempty"`
+	SessionID        string            `json:"session_id"`
+	AgentID          string            `json:"agent_id,omitempty"`
+	IsSidechain      bool              `json:"is_sidechain,omitempty"`
+	Timestamp        string            `json:"timestamp"`
+	Type             string            `json:"type"` // "message" | "boundary"
+	Message          *llm.Message      `json:"message,omitempty"`
+	Usage            *llm.Usage        `json:"usage,omitempty"`    // assistant turns only
+	Boundary         *llm.BoundaryMeta `json:"boundary,omitempty"` // Type=="boundary"
 }
 
 // Store is a directory of session transcripts.
 type Store struct {
 	dir string
-	mu  sync.Mutex // serializes appends across writers in this process
+}
+
+// A running session and an HTTP handler can open separate Stores for the same
+// transcript. Share locks by canonical file path, not by Store instance.
+var fileLocks sync.Map
+
+func transcriptLock(path string) *sync.RWMutex {
+	key, err := filepath.Abs(path)
+	if err != nil {
+		key = filepath.Clean(path)
+	}
+	if runtime.GOOS == "windows" {
+		key = strings.ToLower(key)
+	}
+	lock, _ := fileLocks.LoadOrStore(key, &sync.RWMutex{})
+	return lock.(*sync.RWMutex)
 }
 
 // NewStore returns a Store rooted at dir (created lazily on first write).
@@ -72,8 +91,9 @@ func (s *Store) Append(path string, recs ...Record) error {
 	if len(recs) == 0 {
 		return nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
+	mu := transcriptLock(path)
+	mu.Lock()
+	defer mu.Unlock()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
@@ -101,6 +121,9 @@ func (s *Store) Append(path string, recs ...Record) error {
 // Load reads all records from a transcript file. A missing file yields no
 // records and no error (a fresh session).
 func (s *Store) Load(path string) ([]Record, error) {
+	mu := transcriptLock(path)
+	mu.RLock()
+	defer mu.RUnlock()
 	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -130,6 +153,7 @@ func (s *Store) Load(path string) ([]Record, error) {
 // Boundary records are skipped — the working set is rebuilt by compaction on the
 // next turn, not replayed from disk.
 func Messages(recs []Record) ([]llm.Message, llm.Usage) {
+	excluded := excludedBlocks(recs)
 	var msgs []llm.Message
 	var total llm.Usage
 	for _, r := range recs {
@@ -141,7 +165,7 @@ func Messages(recs []Record) ([]llm.Message, llm.Usage) {
 			total.Add(*r.Usage)
 		}
 	}
-	return msgs, total
+	return filterBlocks(msgs, excluded), total
 }
 
 // LastUUID returns the UUID of the last record, for continuing the parent chain.
@@ -219,6 +243,12 @@ func (w *Writer) write(r Record) {
 // turn (zero for non-assistant messages).
 func (w *Writer) RecordMessage(m llm.Message, usage llm.Usage) {
 	rec := Record{Type: "message", Message: &m}
+	for i := range m.Content {
+		if m.Content[i].ContextID == "" {
+			m.Content[i].ContextID = newID()
+		}
+		rec.BlockIDs = append(rec.BlockIDs, m.Content[i].ContextID)
+	}
 	if usage != (llm.Usage{}) {
 		u := usage
 		rec.Usage = &u

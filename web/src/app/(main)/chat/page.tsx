@@ -860,6 +860,7 @@ function ChatView({
                 <div className="text-muted-foreground/70 pb-2 text-center text-[11px]">向上滚动加载更早的消息…</div>
               )}
               <Transcript
+                conversationId={String(conv.id)}
                 activity={messages}
                 live={running}
                 chat

@@ -309,6 +309,7 @@ func (p *openaiProvider) Stream(ctx context.Context, req CompletionRequest) iter
 			scan := newSSEScanner(resp.Body)
 			started := map[int]bool{}
 			var stopReason string
+			doneSeen := false
 			var usage Usage
 			emitted := false
 			consumerStopped := false
@@ -327,6 +328,7 @@ func (p *openaiProvider) Stream(ctx context.Context, req CompletionRequest) iter
 					continue
 				}
 				if data == "[DONE]" {
+					doneSeen = true
 					break
 				}
 				evs, sr, u, ok := parseOpenAIFrame(data, started)
@@ -352,13 +354,16 @@ func (p *openaiProvider) Stream(ctx context.Context, req CompletionRequest) iter
 			if consumerStopped {
 				return
 			}
+			if streamErr == nil && externalRetry(ctx) && !doneSeen && stopReason == "" {
+				streamErr = io.ErrUnexpectedEOF
+			}
 			if streamErr != nil {
 				yield(StreamEvent{}, streamErr)
 				return
 			}
 			// Empty completion: re-request a few times before surfacing it. Safe
 			// to retry because nothing was yielded downstream this attempt.
-			if !emitted && isEmptyResponseRetryable(stopReason) && attempt < p.cfg.emptyRetries() {
+			if !externalRetry(ctx) && !emitted && isEmptyResponseRetryable(stopReason) && attempt < p.cfg.emptyRetries() {
 				if !backoffSleep(ctx, p.cfg.emptyRetryDelay(attempt)) {
 					yield(StreamEvent{}, ctx.Err())
 					return
@@ -404,7 +409,7 @@ func (p *openaiProvider) Complete(ctx context.Context, req CompletionRequest) (M
 		}
 		// Empty completion (no content blocks): re-request a few times before
 		// returning it, mirroring the streaming path.
-		if len(msg.Content) == 0 && isEmptyResponseRetryable(stop) && attempt < p.cfg.emptyRetries() {
+		if !externalRetry(ctx) && len(msg.Content) == 0 && isEmptyResponseRetryable(stop) && attempt < p.cfg.emptyRetries() {
 			if !backoffSleep(ctx, p.cfg.emptyRetryDelay(attempt)) {
 				return Message{}, "", Usage{}, ctx.Err()
 			}

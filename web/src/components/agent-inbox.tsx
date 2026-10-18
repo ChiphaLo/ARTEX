@@ -2,7 +2,7 @@
 
 import * as React from "react";
 
-import { ArrowDownIcon, ArrowUpIcon, GripVerticalIcon, PencilIcon, Trash2Icon } from "lucide-react";
+import { ArrowDownIcon, ArrowUpIcon, GripVerticalIcon, PencilIcon, Trash2Icon, SendIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { MentionTextarea } from "@/components/mention-textarea";
@@ -111,22 +111,19 @@ function InboxList({ base, refreshKey }: { base: string; refreshKey: number }) {
     next.splice(to, 0, id);
     void mutate(() => api.reorderAgentInbox(base, next, previous));
   }
-  if (items.length === 0 && !error && !editing) return null;
+  if (queued.length === 0 && !error && !editing) return null;
   return (
     <section
       className="max-h-64 shrink-0 overflow-y-auto border-t bg-muted/20 px-3 py-2 text-xs"
       aria-label="Agent 待处理消息"
     >
-      <div className="mb-1 font-medium">待处理消息 ({items.length})</div>
-      <p className="mb-2 text-muted-foreground">
-        Steer：当前工具批次结束后接收，不打断。排队：当前回复结束后执行；可拖动排序。停止只终止当前运行，排队消息保留。
-      </p>
+      <div className="mb-1 font-medium">排队消息 ({queued.length})</div>
       {error && (
         <p className="text-destructive" role="alert">
           队列读取失败：{error}
         </p>
       )}
-      {items.map((item) => {
+      {queued.map((item) => {
         const pending = item.state === "pending";
         const sortable = pending && item.mode === "queue";
         const index = ids.indexOf(item.id);
@@ -173,6 +170,19 @@ function InboxList({ base, refreshKey }: { base: string; refreshKey: number }) {
               </span>
               {sortable && (
                 <>
+                  <button
+                    type="button"
+                    disabled={busy}
+                    title="立即转为 Steer（不打断当前工具）"
+                    aria-label="排队消息转为 Steer"
+                    onClick={() =>
+                      void mutate(() =>
+                        api.editAgentInbox(base, item.id, item.message, item.revision, item.attachments, "steer"),
+                      )
+                    }
+                  >
+                    <SendIcon className="size-3.5" />
+                  </button>
                   <button
                     type="button"
                     disabled={busy || index === 0}

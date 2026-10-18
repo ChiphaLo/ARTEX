@@ -72,12 +72,27 @@ func TestDoStreamHonorsConfiguredRetries(t *testing.T) {
 	cfg := Config{
 		Format: FormatOpenAI, BaseURL: srv.URL, APIKey: "k", Model: "m",
 		MaxRetries: 1, RetryInterval: time.Millisecond,
+		HTTPClient: srv.Client(),
 	}
 	if _, err := doStream(context.Background(), cfg, srv.URL, []byte(`{}`), func(*http.Request) {}, "openai"); err == nil {
 		t.Fatal("want error after retries are exhausted")
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("calls=%d, want 2 (1 attempt + 1 retry)", calls.Load())
+	}
+}
+
+func TestExternalRetryDisablesNestedEstablishmentRetries(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	defer srv.Close()
+	cfg := Config{HTTPClient: srv.Client(), MaxRetries: 5, RetryInterval: time.Millisecond}
+	_, err := doStream(WithExternalRetry(t.Context()), cfg, srv.URL, []byte(`{}`), func(*http.Request) {}, "fixture")
+	if err == nil || calls.Load() != 1 {
+		t.Fatal("nested SDK retries multiplied session budget", calls.Load(), err)
 	}
 }
 

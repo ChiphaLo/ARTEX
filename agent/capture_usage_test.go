@@ -2,17 +2,80 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"iter"
 	"testing"
+	"time"
 
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/norma/agentcore"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 )
 
 type captureUsageProvider struct {
 	stream func(context.Context, func(llm.StreamEvent, error) bool)
+}
+
+func TestCaptureThinkingStreamsBeforeTerminal(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	provider := captureUsageProvider{stream: func(ctx context.Context, y func(llm.StreamEvent, error) bool) {
+		if !y(llm.StreamEvent{Type: llm.SEThinkingDelta, Text: "first thought"}, nil) {
+			return
+		}
+		close(started)
+		select {
+		case <-release:
+		case <-ctx.Done():
+			return
+		}
+		for _, ev := range []llm.StreamEvent{{Type: llm.SEThinkingDelta, Text: "\nsecond thought"}, {Type: llm.SETextDelta, Text: "done"}, {Type: llm.SEMessageDelta, StopReason: "end_turn"}, {Type: llm.SEMessageStop}} {
+			if !y(ev, nil) {
+				return
+			}
+		}
+	}}
+	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+	defer cancel()
+	activities := make(chan db.Activity, 16)
+	done := make(chan error, 1)
+	go func() {
+		_, _, err := captureRun(ctx, agentcore.Options{Provider: provider}, "fixture", func(a db.Activity) { activities <- a })
+		done <- err
+	}()
+	select {
+	case <-started:
+	case <-ctx.Done():
+		t.Fatal("provider did not start")
+	}
+	select {
+	case a := <-activities:
+		var m map[string]any
+		_ = json.Unmarshal(a.Metadata, &m)
+		if a.Kind != "thinking" || m["stream_delta"] != "first thought" || m["stream_id"] == "" {
+			t.Fatalf("no immediate thinking delta: %+v", a)
+		}
+	case <-ctx.Done():
+		t.Fatal("thinking waited for terminal event")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	close(activities)
+	final := false
+	for a := range activities {
+		var m map[string]any
+		_ = json.Unmarshal(a.Metadata, &m)
+		if m["stream_done"] == true {
+			final = a.Detail == "first thought\nsecond thought"
+		}
+	}
+	if !final {
+		t.Fatal("missing authoritative thinking body")
+	}
 }
 
 func (p captureUsageProvider) Stream(ctx context.Context, _ llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
@@ -47,7 +110,7 @@ func TestCaptureRunPersistsUsageOnProviderFailure(t *testing.T) {
 	}}
 
 	var activities []db.Activity
-	_, _, err := captureRun(context.Background(), agentcore.Options{Provider: provider, MaxTurns: 1}, "test", func(a db.Activity) {
+	_, _, err := captureRun(harness.WithModelRetry(context.Background(), harness.ModelRetryPolicy{}), agentcore.Options{Provider: provider, MaxTurns: 1}, "test", func(a db.Activity) {
 		activities = append(activities, a)
 	})
 	if !errors.Is(err, wantErr) {

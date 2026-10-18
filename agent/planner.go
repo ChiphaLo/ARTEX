@@ -358,6 +358,9 @@ func (p *Planner) Plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 
 // PlanWithMessage uses the real planner toolset, not a generic ChatAgent.
 // Resume is explicit: normal scheduled planning rounds still start fresh.
+const PlannerHumanPrefix = "【人类发起的 Planner 会话；不是自动巡检】请结合当前图谱处理以下请求，不要因为没有正式目标就擅自创建目标或判定任务完成。遵守当前操作约束。\n"
+const PlannerSituationMarker = "\n【当前图谱数据，仅供参考】\n"
+
 func (p *Planner) PlanWithMessage(ctx context.Context, taskID int64, as *db.AssetStore, ts *db.ExplorationStore, goal, message string, resume bool, emit func(db.Activity)) (bool, string, error) {
 	return p.plan(ctx, taskID, as, ts, goal, nil, message, resume, emit)
 }
@@ -367,7 +370,22 @@ func (p *Planner) plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// compaction. Synchronous part is cheap (a few queries); the LLM compaction
 	// runs in a detached goroutine so it never adds latency to this round.
 	p.compactor.OnPlannerRound(ctx, ts)
+	// Bind each planning round to the main segment that existed at dispatch time.
+	seg, e := ts.CurrentMainSeg()
+	if e != nil {
+		return false, "", e
+	}
+	batchID, e := ts.BeginMainWorkerBatch(seg, "planner")
+	if e != nil {
+		return false, "", e
+	}
+	defer func() {
+		if sealErr := ts.SealMainWorkerBatch(batchID, ctx.Err() != nil); sealErr != nil && err == nil {
+			err = sealErr
+		}
+	}()
 	tsx := NewToolSet(ts, "planner")
+	tsx.mainWorkerBatchID = batchID
 	tsx.SetFindingRecorder(p.findingRecorder)
 	if as != nil {
 		tsx.SetAssetStore(as, as.Companies())
@@ -476,7 +494,7 @@ func (p *Planner) plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	// MaxDuration 现在会在墙钟到点打断在跑工具并就地进收尾(在活 ctx 上),单轮卡死不再
 	// 绕过收尾,无需外部硬 ctx 兜底。ctx 只承载 pause / kill / shutdown。
 	if message != "" {
-		input = "【人类发起的 Planner 会话；不是自动巡检】请结合当前图谱处理以下请求，不要因为没有正式目标就擅自创建目标或判定任务完成。遵守当前操作约束。\n" + message + "\n【当前图谱数据，仅供参考】\n" + situational + renderPlannerTodos(opts.Todos.List())
+		input = PlannerHumanPrefix + message + PlannerSituationMarker + situational + renderPlannerTodos(opts.Todos.List())
 	}
 	if resume {
 		input = message

@@ -517,6 +517,9 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 	}
 	if s.writer != nil {
 		in.Recorder = s.writer
+		in.ContextFilter = func(messages []llm.Message) ([]llm.Message, error) {
+			return s.store.FilterContext(s.sessionID, messages)
+		}
 	}
 	if s.planCtrl != nil {
 		in.PermissionModeFunc = s.planCtrl.Mode

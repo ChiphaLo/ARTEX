@@ -1068,6 +1068,11 @@ func (t *ToolSet) addOneIntent(it intentItem) (int64, error) {
 	payload := map[string]any{"summary": it.Summary}
 	if t.mainWorkerBatchID > 0 {
 		payload["main_batch_id"] = t.mainWorkerBatchID
+		binding, err := t.ts.MainWorkerBinding(t.mainWorkerBatchID)
+		if err != nil {
+			return 0, err
+		}
+		payload["dispatch_binding"] = binding
 	}
 	if len(anchors) > 0 {
 		payload["asset_ids"] = anchors
@@ -1139,9 +1144,18 @@ func (t *ToolSet) addIntent() actool.CoreTool {
 				if e, bad := errs["0"]; bad {
 					return actool.Errorf(e), nil
 				}
+				if t.mainWorkerBatchID > 0 {
+					binding, _ := t.ts.MainWorkerBinding(t.mainWorkerBatchID)
+					return jsonResult(map[string]any{"id": ids[0], "worker_id": ids[0], "binding": binding})
+				}
 				return actool.Text(fmt.Sprintf("intent created: %d", ids[0])), nil
 			}
 			out := map[string]any{"ids": ids}
+			if t.mainWorkerBatchID > 0 {
+				binding, _ := t.ts.MainWorkerBinding(t.mainWorkerBatchID)
+				out["binding"] = binding
+				out["worker_ids"] = ids
+			}
 			if len(errs) > 0 {
 				out["errors"] = errs
 			}

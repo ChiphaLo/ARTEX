@@ -315,6 +315,56 @@ func TestMainWorkerBatchActualEngineWithoutPlannerGoal(t *testing.T) {
 	}
 }
 
+func TestPlannerBatchReturnsOnceToOriginalMainAfterNewSession(t *testing.T) {
+	p := &mainBatchProvider{dispatch: true}
+	s, task := mainBatchFixture(t, p)
+	planner := agent.NewPlanner(p, "fixture-planner", s.m.dir, nil, 64000, 5)
+	if _, _, err := planner.PlanWithMessage(t.Context(), taskNumericID(task.ID), s.m.Assets(), task.Store, "fixture", "dispatch two synthetic checks", false, nil); err != nil {
+		t.Fatal(err)
+	}
+	batch := mainBatchID(t, s, task)
+	workers, err := task.Store.ListByKind(db.KindIntent, 10)
+	if err != nil || len(workers) != 2 {
+		t.Fatal(workers, err)
+	}
+	newSession, err := task.Store.NewMainSession()
+	if err != nil || newSession.Seq == 0 {
+		t.Fatal(newSession, err)
+	}
+	for _, n := range workers {
+		_ = task.Store.SetIntentState(n.ID, "running")
+	}
+	_ = task.Store.SetIntentState(workers[0].ID, "done")
+	_, _ = task.Store.AppendActivity(db.Activity{Worker: "work#fixture1", NodeID: &workers[0].ID, Kind: "result", Detail: "first synthetic result"})
+	s.pumpMainWorkerBatches()
+	p.mu.Lock()
+	early := p.autoCalls
+	p.mu.Unlock()
+	if early != 0 {
+		t.Fatal("returned before the second worker finished")
+	}
+	_ = task.Store.SetIntentState(workers[1].ID, "done")
+	_, _ = task.Store.AppendActivity(db.Activity{Worker: "work#fixture2", NodeID: &workers[1].ID, Kind: "result", Detail: "second synthetic result"})
+	s.pumpMainWorkerBatches()
+	mainBatchEventually(t, func() bool {
+		var state string
+		_ = s.m.pg.QueryRow(`SELECT state FROM main_worker_batches WHERE id=$1`, batch).Scan(&state)
+		return state == "delivered"
+	})
+	s.pumpMainWorkerBatches()
+	p.mu.Lock()
+	count, message := p.autoCalls, p.autoMessage
+	p.mu.Unlock()
+	if count != 1 || !strings.Contains(message, `"dispatcher":"planner"`) || !strings.Contains(message, "work#fixture1") || !strings.Contains(message, "second synthetic result") {
+		t.Fatal("missing planner/round/worker binding", count, message)
+	}
+	var wrongSeg int
+	_ = s.m.pg.QueryRow(`SELECT count(*) FROM activity WHERE exploration_id=$1 AND worker='mainagent' AND COALESCE(main_seg,0)<>0`, task.ExpID).Scan(&wrongSeg)
+	if wrongSeg != 0 {
+		t.Fatal("planner results leaked into new main segment")
+	}
+}
+
 func TestMainWorkerBatchBusyPauseDeleteAndManualStop(t *testing.T) {
 	p := &mainBatchProvider{blockAuto: make(chan struct{})}
 	s, task := mainBatchFixture(t, p)

@@ -20,6 +20,7 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { SecretInput } from "@/components/ui/secret-input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
@@ -314,6 +315,7 @@ function ProfileSheet({
   const [name, setName] = React.useState("");
   const [format, setFormat] = React.useState<"anthropic" | "openai" | "openai-responses">("anthropic");
   const [model, setModel] = React.useState("");
+  const [modelList, setModelList] = React.useState("");
   const [baseUrl, setBaseUrl] = React.useState("");
   const [proxy, setProxy] = React.useState("");
   const [apiKey, setApiKey] = React.useState("");
@@ -343,6 +345,7 @@ function ProfileSheet({
     setName(profile?.name ?? "");
     setFormat(profile?.format === "openai" || profile?.format === "openai-responses" ? profile.format : "anthropic");
     setModel(profile?.model ?? "");
+    setModelList((profile?.models ?? (profile ? [profile.model] : [])).join("\n"));
     setBaseUrl(profile?.base_url ?? "");
     setProxy(profile?.proxy ?? "");
     setRps(String(profile?.rate_per_second ?? 0));
@@ -429,6 +432,7 @@ function ProfileSheet({
         name: name.trim(),
         format,
         model: model.trim(),
+        models: [...new Set([model.trim(), ...modelList.split(/[\n,]+/).map((x) => x.trim())].filter(Boolean))],
         base_url: baseUrl.trim(),
         proxy: proxy.trim(),
         api_key: apiKey,
@@ -507,7 +511,19 @@ function ProfileSheet({
           </div>
 
           <div className="grid gap-2">
-            <Label htmlFor="p-model">模型</Label>
+            <Label htmlFor="p-model">当前模型</Label>
+            <Label htmlFor="p-models">Provider 可用模型（每行一个，可从 API 列表点击添加）</Label>
+            <Textarea
+              id="p-models"
+              rows={4}
+              value={modelList}
+              onChange={(e) => setModelList(e.target.value)}
+              placeholder="model-a\nmodel-b"
+              autoComplete="off"
+            />
+            <p className="text-xs text-muted-foreground">
+              共用本 Provider 的 URL、Key 和参数；卡片可直接切换模型，无需重复新建 Provider。
+            </p>
             <div className="flex gap-2">
               <Input
                 id="p-model"
@@ -540,6 +556,7 @@ function ProfileSheet({
                         type="button"
                         className="w-full shrink-0 rounded-md px-2 py-1.5 text-left font-mono text-xs hover:bg-accent hover:text-accent-foreground"
                         onClick={() => {
+                          setModelList((old) => [...new Set([...old.split("\n"), m].filter(Boolean))].join("\n"));
                           setModel(m);
                           setModelsOpen(false);
                         }}
@@ -922,7 +939,36 @@ export default function LLMPage() {
                             {h.label}
                           </Badge>
                         </div>
-                        <code className="mt-1 block truncate font-mono text-muted-foreground text-xs">{p.model}</code>
+                        <fieldset
+                          className="min-w-0 border-0 p-0"
+                          aria-label="切换 Provider 模型"
+                          onClick={(e) => e.stopPropagation()}
+                          onKeyDown={(e) => e.stopPropagation()}
+                        >
+                          <Select
+                            value={p.model}
+                            onValueChange={async (model) => {
+                              try {
+                                await api.saveLLMProfile({ ...p, id: Number(p.id), model });
+                                await load();
+                                toast.success(`已切换：${model}`);
+                              } catch (e) {
+                                toast.error(`切换失败：${(e as Error).message}`);
+                              }
+                            }}
+                          >
+                            <SelectTrigger className="mt-1 w-full font-mono text-xs">
+                              <SelectValue />
+                            </SelectTrigger>
+                            <SelectContent>
+                              {(p.models ?? [p.model]).map((m) => (
+                                <SelectItem key={m} value={m}>
+                                  {m}
+                                </SelectItem>
+                              ))}
+                            </SelectContent>
+                          </Select>
+                        </fieldset>
                       </div>
                     </div>
 

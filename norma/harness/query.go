@@ -2,7 +2,9 @@ package harness
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
 	"iter"
 	"strconv"
 	"strings"
@@ -16,6 +18,7 @@ import (
 
 // QueryInput is a fully-resolved request to run the loop.
 type QueryInput struct {
+	ContextFilter   func([]llm.Message) ([]llm.Message, error)
 	Provider        llm.Provider
 	System          []string
 	DynamicBoundary int
@@ -390,6 +393,8 @@ func (l *loop) run() {
 		defer stopTool()
 	}
 	iterations := 0
+	retryPolicy := modelRetryPolicy(l.ctx)
+	consecutiveFailures := 0
 	for {
 		if l.ctx.Err() != nil {
 			l.finish(ReasonAbortedStreaming, l.ctx.Err(), "")
@@ -404,10 +409,30 @@ func (l *loop) run() {
 			return
 		}
 
+		if l.in.ContextFilter != nil {
+			filtered, err := l.in.ContextFilter(l.messages)
+			if err != nil {
+				l.finish(ReasonModelError, err, "")
+				return
+			}
+			l.messages = filtered
+			l.boundaryCount = countBoundaries(l.messages)
+		}
 		l.injectPendingMessages()
 		// Non-destructive proactive compaction (MicroCompact → AutoCompact).
 		if l.in.Compactor != nil {
 			l.messages = l.in.Compactor.Pre(l.ctx, l.messages, l.lastInputTokens)
+			if l.in.ContextFilter != nil {
+				filtered, err := l.in.ContextFilter(l.messages)
+				if err != nil {
+					l.finish(ReasonModelError, err, "")
+					return
+				}
+				l.messages = filtered
+				if count := countBoundaries(filtered); count < l.boundaryCount {
+					l.boundaryCount = count
+				}
+			}
 			l.recordNewBoundary()
 		}
 
@@ -426,6 +451,17 @@ func (l *loop) run() {
 				l.hasAttemptedReactiveCompact = true
 				if msgs, ok := l.in.Compactor.Reactive(l.ctx, l.messages); ok {
 					l.messages = msgs
+					if l.in.ContextFilter != nil {
+						filtered, err := l.in.ContextFilter(l.messages)
+						if err != nil {
+							l.finish(ReasonModelError, err, "")
+							return
+						}
+						l.messages = filtered
+						if count := countBoundaries(filtered); count < l.boundaryCount {
+							l.boundaryCount = count
+						}
+					}
 					l.recordNewBoundary()
 					l.lastContinue = ContinueReactiveCompactRetry
 					continue
@@ -433,9 +469,60 @@ func (l *loop) run() {
 				l.finish(ReasonPromptTooLong, streamErr, "")
 				return
 			}
+			// Tools may have completed while the stream was still arriving. Drain
+			// them and record their exact call/result pairs before retrying; never
+			// re-run a previously executed command or fabricate partial arguments.
+			if exec != nil && exec.count() > 0 {
+				cs, _ := exec.finish()
+				if cs {
+					return
+				}
+				asst.Content = exec.executedCalls()
+				l.messages = append(l.messages, asst)
+				l.record(asst, usageDelta(usageBefore, l.usage))
+				result := llm.Message{Role: llm.RoleUser, Content: exec.results()}
+				l.messages = append(l.messages, result)
+				l.record(result, llm.Usage{})
+				for _, extra := range exec.extraMessages() {
+					l.messages = append(l.messages, extra)
+					l.record(extra, llm.Usage{})
+				}
+			} else if u := usageDelta(usageBefore, l.usage); u != (llm.Usage{}) {
+				// Retain billed usage from failed attempts without replaying an
+				// incomplete assistant message or unfinished tool arguments.
+				l.record(llm.Message{Role: llm.RoleAssistant}, u)
+			}
+			if u := l.usage; u != (llm.Usage{}) {
+				if !l.emit(Event{Kind: KindUsage, Usage: &u}) {
+					return
+				}
+			}
+			if consecutiveFailures < retryPolicy.Retries && retryPolicy.Retryable != nil && retryPolicy.Retryable(streamErr) {
+				consecutiveFailures++
+				if !l.emit(Event{Kind: KindRetry, Text: fmt.Sprintf("模型连接暂时失败，等待 %s 后重试（%d/%d）", retryPolicy.Delay, consecutiveFailures, retryPolicy.Retries)}) {
+					return
+				}
+				timer := time.NewTimer(retryPolicy.Delay)
+				select {
+				case <-l.toolCtx.Done():
+					timer.Stop()
+					if l.ctx.Err() != nil {
+						l.finish(ReasonAbortedStreaming, l.ctx.Err(), "")
+						return
+					}
+					if !l.beginSettlement(ReasonTimeout, &schemas) {
+						l.finish(ReasonTimeout, nil, "")
+						return
+					}
+					l.toolCtx = l.ctx
+				case <-timer.C:
+				}
+				continue
+			}
 			l.finish(ReasonModelError, streamErr, "")
 			return
 		}
+		consecutiveFailures = 0
 		l.hasAttemptedReactiveCompact = false
 		l.messages = append(l.messages, asst)
 		turnUsage := usageDelta(usageBefore, l.usage)
@@ -837,6 +924,7 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 	}
 	exec = newStreamExec(l)
 	acc := llm.NewAccumulator()
+	terminalSeen := false
 
 	// A stream may announce several parallel calls before any of their argument
 	// fragments arrive (the Responses API emits one output_item.added per call
@@ -890,8 +978,12 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 				raw = alt
 			}
 		}
-		if raw == "" || !jsonValid(raw) {
+		if raw == "" {
 			raw = "{}"
+		}
+		if !jsonValid(raw) {
+			err = fmt.Errorf("incomplete or invalid arguments for tool %s", p.name)
+			return true // do not execute fabricated arguments
 		}
 		block := llm.ContentBlock{Type: llm.BlockToolUse, ID: p.id, Name: p.name, Input: []byte(raw)}
 		if !l.emit(Event{Kind: KindToolUse, ToolUse: &block}) {
@@ -930,6 +1022,9 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 			err = e
 			break
 		}
+		if ev.Type == llm.SEMessageStop || (ev.Type == llm.SEMessageDelta && ev.StopReason != "") {
+			terminalSeen = true
+		}
 		switch ev.Type {
 		case llm.SEToolInputJSON:
 			if p := routeInput(ev.ItemID); p != nil {
@@ -952,14 +1047,14 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		}
 		switch ev.Type {
 		case llm.SETextDelta:
-			if !finalizeAll() {
+			if !flushComplete() {
 				return asst, exec, "", nil, true, false
 			}
 			if ev.Text != "" && !l.emit(Event{Kind: KindText, Text: ev.Text}) {
 				return asst, exec, "", nil, true, false
 			}
 		case llm.SEThinkingDelta:
-			if !finalizeAll() {
+			if !flushComplete() {
 				return asst, exec, "", nil, true, false
 			}
 			if ev.Text != "" && !l.emit(Event{Kind: KindThinking, Text: ev.Text}) {
@@ -980,18 +1075,26 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 				return asst, exec, "", nil, true, false
 			}
 		default:
-			if !finalizeAll() {
+			if !flushComplete() {
 				return asst, exec, "", nil, true, false
 			}
 		}
 		acc.Add(ev)
 	}
-	if !finalizeAll() {
+	if err == nil && !terminalSeen && ModelRetryManaged(l.ctx) {
+		err = io.ErrUnexpectedEOF
+	}
+	// A failed stream must NOT execute unfinished tool calls (e.g. {} after
+	// truncated JSON). Already finalized calls are retained by the retry loop.
+	if err == nil && !finalizeAll() {
 		return asst, exec, "", nil, true, false
 	}
 	l.usage.Add(acc.Usage)
 	asst = acc.Message()
 	stopReason = acc.StopReason
+	if err == nil && ModelRetryManaged(l.ctx) && len(asst.Content) == 0 && stopReason != "max_tokens" {
+		err = fmt.Errorf("model returned an empty completion")
+	}
 	if err != nil {
 		return asst, exec, stopReason, err, false, false
 	}
@@ -1019,6 +1122,9 @@ func (l *loop) completeAndExecute(req llm.CompletionRequest) (asst llm.Message, 
 	l.usage.Add(usage)
 	asst = msg
 	stopReason = sr
+	if ModelRetryManaged(l.ctx) && (sr == "" || (len(msg.Content) == 0 && sr != "max_tokens")) {
+		return asst, exec, sr, fmt.Errorf("model returned an empty or unterminated completion"), false, false
+	}
 	for _, b := range msg.Content {
 		switch b.Type {
 		case llm.BlockThinking:
@@ -1049,33 +1155,5 @@ func (l *loop) completeAndExecute(req llm.CompletionRequest) (asst llm.Message, 
 }
 
 func jsonValid(s string) bool {
-	// minimal check used only to guard tool input assembly
-	s = strings.TrimSpace(s)
-	if s == "" {
-		return false
-	}
-	depth := 0
-	inStr := false
-	esc := false
-	for _, r := range s {
-		if inStr {
-			if esc {
-				esc = false
-			} else if r == '\\' {
-				esc = true
-			} else if r == '"' {
-				inStr = false
-			}
-			continue
-		}
-		switch r {
-		case '"':
-			inStr = true
-		case '{', '[':
-			depth++
-		case '}', ']':
-			depth--
-		}
-	}
-	return depth == 0 && !inStr
+	return json.Valid([]byte(s))
 }

@@ -30,7 +30,8 @@ const (
 // ContentBlock is one piece of message content. Which fields are populated
 // depends on Type. This is the Anthropic content-block union.
 type ContentBlock struct {
-	Type BlockType `json:"type"`
+	ContextID string    `json:"-"` // local transcript identity; never sent to providers
+	Type      BlockType `json:"type"`
 
 	// Text block.
 	Text string `json:"text,omitempty"`

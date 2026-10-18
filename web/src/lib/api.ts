@@ -916,6 +916,13 @@ export const api = {
       request_id,
     }),
   agentRunStatus: (base: string) => get<AgentRunStatus>(inboxItemPath(base, "run")),
+  excludeContext: (seq: number, taskId?: string, conversationId?: string) =>
+    post<{ ok: boolean }>(
+      conversationId
+        ? `/conversations/${conversationId}/messages/${seq}/exclude-context`
+        : `/exploration/activity/${seq}/exclude-context${tq(taskId)}`,
+      {},
+    ),
   continueAgentRun: (base: string, run_id: number) =>
     post<{ status: string }>(inboxItemPath(base, "continue"), { run_id }),
   sendPlannerMessage: (
@@ -933,12 +940,18 @@ export const api = {
     }),
   stopPlanner: (taskId: string) => post<{ status: string }>(`/tasks/${taskId}/planner/stop`, {}),
   agentInbox: (base: string) => get<AgentInboxResponse>(base),
-  editAgentInbox: (base: string, id: number, message: string, revision: number, attachments?: ChatAttachment[]) =>
-    patch<AgentInboxResponse>(inboxItemPath(base, String(id)), { message, revision, attachments }),
+  editAgentInbox: (
+    base: string,
+    id: number,
+    message: string,
+    revision: number,
+    attachments?: ChatAttachment[],
+    mode?: "queue" | "steer",
+  ) => patch<AgentInboxResponse>(inboxItemPath(base, String(id)), { message, revision, attachments, mode }),
   deleteAgentInbox: (base: string, id: number) => del<AgentInboxResponse>(inboxItemPath(base, String(id))),
   reorderAgentInbox: (base: string, ids: number[], previous: number[]) =>
     put<AgentInboxResponse>(inboxItemPath(base, "order"), { ids, previous }),
-  chatStatus: (taskId: string) => get<{ running: boolean }>(`/tasks/${taskId}/chat/status`),
+  chatStatus: (taskId: string) => get<{ running: boolean; planner_running?: boolean }>(`/tasks/${taskId}/chat/status`),
   // 方式1 文件上传:落到会话/任务工作目录 uploads/，返回可供 agent Read 的相对路径。
   chatUpload: async (scope: "task" | "session" | "staging", id: string, files: File[]) => {
     if (MOCK)
@@ -1016,6 +1029,7 @@ export const api = {
     }),
   llmProfiles: () => get<{ profiles: LLMProfile[] }>("/llm/profiles").then((r) => arr(r.profiles)),
   saveLLMProfile: (p: {
+    models?: string[];
     id?: number; // omit/0 = create; set = update that profile
     name: string;
     format: string;

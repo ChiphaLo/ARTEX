@@ -616,6 +616,7 @@ export const FINDING_UNASSIGNED_ASSET = "__none__";
 
 // ---- Activity / sessions ----
 export type ActivityKind =
+  | "retry"
   | "tool_use"
   | "tool_result"
   | "text"
@@ -651,6 +652,10 @@ export interface Activity {
   metadata?: {
     delivery_mode?: "steer" | "queue";
     inbox_id?: number;
+    stream_id?: string;
+    stream_delta?: string;
+    stream_done?: boolean;
+    context_excluded?: boolean;
     llm_transition?: LLMTransition;
   };
   source_task_id?: string;
@@ -1026,6 +1031,7 @@ export interface NotificationDelivery {
 
 // ---- LLM config ----
 export interface LLMProfile {
+  models?: string[];
   id: string;
   name: string;
   format: "openai" | "anthropic" | "openai-responses";

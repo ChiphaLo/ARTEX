@@ -132,11 +132,14 @@ func (s *Server) attachLiveInbox(ctx context.Context, scope, worker, baseDir str
 			mu.Lock()
 			background = intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: p.Message}
 			mu.Unlock()
-			messages = append(messages, llm.UserText("【人类实时 Steer，不打断当前工具；请在本轮继续处理】\n"+composeAgentMessage(p.AgentMessage, p.Attachments, baseDir)))
+			messages = append(messages, llm.UserText(liveSteerPrefix+composeAgentMessage(p.AgentMessage, p.Attachments, baseDir)))
 		}
 		return messages
 	})
 }
+
+const liveSteerPrefix = "【人类实时 Steer，不打断当前工具；请在本轮继续处理】\n"
+
 func (s *Server) wakeInbox() {
 	if s.inboxWake != nil {
 		select {
@@ -409,6 +412,7 @@ func (s *Server) agentInboxAPI(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Message     string            `json:"message"`
 		Revision    int               `json:"revision"`
+		Mode        string            `json:"mode,omitempty"`
 		Attachments *[]chatAttachment `json:"attachments,omitempty"`
 	}
 	if err := decode(r, &req); err != nil {
@@ -441,7 +445,15 @@ func (s *Server) agentInboxAPI(w http.ResponseWriter, r *http.Request) {
 		}
 		p.Message, p.AgentMessage = req.Message, expanded
 		payload, _ := json.Marshal(p)
-		if err := s.m.pg.EditAgentMessage(scope, id, req.Revision, payload); err != nil {
+		mode := req.Mode
+		if mode == "" {
+			mode = "queue"
+		}
+		if mode != "queue" && mode != "steer" {
+			writeErr(w, 400, "invalid mode")
+			return
+		}
+		if err := s.m.pg.EditAgentMessage(scope, id, req.Revision, payload, mode); err != nil {
 			inboxError(w, err)
 			return
 		}

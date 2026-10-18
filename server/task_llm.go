@@ -15,6 +15,7 @@ import (
 	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 	"github.com/Autumn-27/artex/llmrec"
+	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
 	"github.com/Autumn-27/norma/transcript"
 )
@@ -249,6 +250,9 @@ func completeTaskLLM(ctx context.Context, taskID string, req llm.CompletionReque
 		// 同 provider 安全窗口重试:非流式调用要么整体成功、要么整体失败,没有
 		// 中途已交付输出的问题,所以任何瞬时失败都可原样重试。
 		retries, backoffOf := sameProviderRetryPolicy(selection.retry)
+		if harness.ModelRetryManaged(ctx) {
+			retries = 0
+		}
 		for attempt := 0; ; attempt++ {
 			msg, sr, usage, callErr = selection.provider.Complete(ctx, req)
 			if callErr != nil && ctx.Err() == nil &&
@@ -296,6 +300,9 @@ func streamTaskLLM(ctx context.Context, taskID string, req llm.CompletionRequest
 			var pending []llm.StreamEvent
 			var streamErr error
 			retries, backoffOf := sameProviderRetryPolicy(selection.retry)
+			if harness.ModelRetryManaged(ctx) {
+				retries = 0
+			}
 			// 同 provider 安全窗口重试:committed 之前(还没向调用方交付任何输出)
 			// 的瞬时失败可以原样重放,不会重复模型输出或工具执行。committed 之后、
 			// ctx 取消、或确定性/额度错误则跳出,交给下方原有的透传/故障转移逻辑。

@@ -44,7 +44,9 @@ func (p *interactiveProvider) Complete(ctx context.Context, req llm.CompletionRe
 		}
 	}
 	if n == p.failAt {
-		return llm.Message{}, "", llm.Usage{}, errors.New("synthetic disconnected stream")
+		// Recovery-control fixtures need a terminal, non-retryable failure;
+		// transient disconnects are now retried inside the active session.
+		return llm.Message{}, "", llm.Usage{}, errors.New("status 400: synthetic invalid request")
 	}
 	return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("synthetic response")}}, "end_turn", llm.Usage{}, nil
 }

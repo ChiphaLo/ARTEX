@@ -103,12 +103,11 @@ export const RETRY_LAYERS = {
   intent: {
     title: "意图重跑",
     where: "本项目 · 进程级，全局一份",
-    trigger:
-      "前面几层都没兜住：worker 以 model_error 收场——内层重试全部用尽，或者流已经开始交付输出后才断掉（那时重放不安全，只能整条重来）。",
+    trigger: "Worker 在会话内重试用尽后仍以 model_error 收场；仅在明确启用意图重跑时生效。",
     skips: "额度耗尽已经由轮询换配置处理，不在这里重跑；任务被暂停 / 终止 / 进入收尾时立即让位，不占用退避时间。",
-    desc: "整条意图从头再跑一遍。它是最外层，一次重跑意味着里面几层的次数会再乘一遍。",
+    desc: "默认关闭，避免重复已经执行的操作。显式启用将整条意图重新运行，可能产生重复副作用。",
     attemptsLabel: "重跑次数",
-    defAttempts: 2,
+    defAttempts: 0,
     defInterval: "固定 3s",
     offHint: "-1 = 不重跑，该意图直接判为 blocked",
   },
@@ -243,7 +242,8 @@ export function ProfileRetryFields({
         <Label className="text-sm">重试覆盖</Label>
         <p className="text-muted-foreground text-xs">
           只对这个配置生效，覆盖「重试与退避」里的全局默认。每格留空 = 跟随全局；次数填 -1 = 关掉这层重试；
-          间隔填了就用固定间隔取代指数退避。熔断与意图重跑是进程级的，只能在全局那页调。
+          间隔填了就用固定间隔取代指数退避。熔断与意图重跑是进程级的，只能在全局那页调。 Agent
+          会话固定使用安全边界内重试（20 秒，最多额外 5 次），不叠加下方三层 SDK 重试；下方配置适用于其他非托管调用。
         </p>
       </div>
       {(["connect", "empty", "stream"] as const).map((k) => (
@@ -311,12 +311,15 @@ export function RetryPolicyPanel() {
   return (
     <div className="grid gap-4">
       <div className="rounded-lg border bg-muted/30 p-3 text-muted-foreground text-xs leading-relaxed">
-        一次模型调用的失败会依次经过五层重试，由内到外：
+        Agent 会话遇到瞬时故障时，在原会话内等待 20 秒后重试，最多额外 5
+        次。等待期间保持运行状态，保留已执行的工具结果，不从头重跑。
+        用户停止和会话时限仍优先；认证、额度耗尽或参数错误不会盲目重试。会话内重试不会叠加建连、空响应和安全窗口重试。
+        其他非托管模型调用仍沿用以下策略，由内到外：
         <span className="text-foreground"> 建连 → 空响应 → 同 provider 安全窗口 → 轮询熔断 → 意图重跑</span>
         。内层用尽才轮到外层，所以次数是
         <span className="text-foreground">相乘</span>
         的——把每层都拉满，一次抖动能烧掉几十次请求。
-        全部留空即当前默认值，与没有这页时的行为完全一致。前三层可以在每个模型配置里单独覆盖。
+        意图重跑默认关闭；如显式启用，可能重复工具副作用。前三层可以在每个模型配置里单独覆盖。
       </div>
 
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">

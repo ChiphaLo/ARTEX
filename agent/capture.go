@@ -2,6 +2,8 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -12,6 +14,7 @@ import (
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/google/uuid"
 )
 
 // captureRun drives one agent turn-to-completion over Session.Prompt and emits a
@@ -35,6 +38,10 @@ func captureRun(ctx context.Context, opts agentcore.Options, input string, emit 
 // multiple prompts on the SAME conversation (e.g. a settlement round that reuses
 // the worker's accumulated context after the main run hit max_turns).
 func captureRunSession(ctx context.Context, s *agentcore.Session, input string, emit func(db.Activity)) (string, harness.TerminalReason, error) {
+	if !harness.ModelRetryManaged(ctx) {
+		ctx = harness.WithModelRetry(ctx, harness.ModelRetryPolicy{Retries: 5, Delay: 20 * time.Second, Retryable: retryableSessionError})
+	}
+	ctx = llm.WithExternalRetry(ctx)
 	ctx, auditTrace := intercept.WithTrace(ctx, input, approvalHistory(s.Messages()))
 	defer auditTrace.Finish()
 	var reason harness.TerminalReason
@@ -51,6 +58,19 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 
 	var tbuf strings.Builder
 	var tkind string
+	var thinkingID string
+	var thinkingChunk strings.Builder
+	var lastThinkingEmit time.Time
+	emitThinking := func() {
+		if thinkingChunk.Len() == 0 {
+			return
+		}
+		chunk := thinkingChunk.String()
+		thinkingChunk.Reset()
+		metadata, _ := json.Marshal(map[string]any{"stream_id": thinkingID, "stream_delta": chunk})
+		rec(db.Activity{Kind: "thinking", Summary: firstLine(chunk, 200), Metadata: metadata})
+		lastThinkingEmit = time.Now()
+	}
 	flush := func() {
 		if tbuf.Len() == 0 {
 			return
@@ -59,8 +79,20 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		k := tkind
 		tbuf.Reset()
 		tkind = ""
+		if k == "thinking" && s == "" {
+			thinkingChunk.Reset()
+			thinkingID = ""
+			lastThinkingEmit = time.Time{}
+		}
 		if s != "" {
-			rec(db.Activity{Kind: k, Summary: firstLine(s, 200), Detail: s})
+			a := db.Activity{Kind: k, Summary: firstLine(s, 200), Detail: s}
+			if k == "thinking" {
+				emitThinking()
+				a.Metadata, _ = json.Marshal(map[string]any{"stream_id": thinkingID, "stream_done": true})
+				thinkingID = ""
+				lastThinkingEmit = time.Time{}
+			}
+			rec(a)
 		}
 	}
 	addDelta := func(kind, text string) {
@@ -72,6 +104,15 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		}
 		tkind = kind
 		tbuf.WriteString(text)
+		if kind == "thinking" {
+			if thinkingID == "" {
+				thinkingID = uuid.NewString()
+			}
+			thinkingChunk.WriteString(text)
+			if lastThinkingEmit.IsZero() || time.Since(lastThinkingEmit) >= 200*time.Millisecond || thinkingChunk.Len() >= 1024 {
+				emitThinking()
+			}
+		}
 	}
 	lastTool := &runTrace{startedAt: time.Now()}
 	var lastUsage *llm.Usage
@@ -90,6 +131,9 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			return finalText, reason, err
 		}
 		switch ev.Kind {
+		case harness.KindRetry:
+			flush()
+			rec(db.Activity{Kind: "retry", Summary: ev.Text})
 		case harness.KindToolUse:
 			if ev.ToolUse == nil {
 				continue
@@ -158,6 +202,16 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	}
 	flush() // safety: any unflushed text if the stream ended without KindResult
 	return finalText, reason, rerr
+}
+
+var permanentSessionStatus = regexp.MustCompile(`(?i)(?:status(?:\s+code)?|http(?:\s+status)?)\s*[=:]?\s*(?:400|401|403|404|413|422)\b`)
+
+func retryableSessionError(err error) bool {
+	if err == nil || IsQuotaExhaustedMessage(err.Error()) || permanentSessionStatus.MatchString(err.Error()) {
+		return false
+	}
+	s := strings.ToLower(err.Error())
+	return !strings.Contains(s, "context_length") && !strings.Contains(s, "context length") && !strings.Contains(s, "too long")
 }
 
 func activityWithUsage(activity db.Activity, usage *llm.Usage) db.Activity {

@@ -19,6 +19,7 @@ const (
 	KindProgress   EventKind = "progress"    // mid-tool progress
 	KindUsage      EventKind = "usage"       // cumulative token usage so far (per model turn)
 	KindResult     EventKind = "result"      // terminal event (loop finished)
+	KindRetry      EventKind = "retry"       // transient model failure; run remains active
 )
 
 // Event is one item in the loop's output stream.

@@ -93,7 +93,8 @@ API 保持旧客户端兼容：`POST /api/chat`（任务主会话）和
 - 完成、blocked、exhausted、stopped、deleted 都算已结束，汇总区分成功与失败。
   open/running/paused 不算完成；暂停任务不启动自动汇总，恢复后可继续等待。
 - 主 Agent 正在处理其他消息时，回传排队；批次状态 CAS 防止重复唤醒和
-  并发写坏会话。Planner 自主创建的后台意图不混入此批。
+  并发写坏会话。Planner 派发的意图独立绑定其规划轮次，不混入 Main 的批次，
+  同样在全部终态后向派发时绑定的主会话分段回传。
 - 自动回合只允许本任务既有的只读图/结果查询工具，没有 Bash、MCP、派任务、
   修改目标或 SDK 后台执行工具。Worker 文本只是结果数据，不是新的授权。
   人工主 Agent 对话保留原有操作工具，但不再提供轮询用的 `sleep`。
@@ -105,15 +106,12 @@ API 保持旧客户端兼容：`POST /api/chat`（任务主会话）和
 
 ## 截图预览
 
-### 可选 Kali MCP Gateway
+### 外部 MCP 接入
 
-通过独立的 `vxcontrol/kali-linux:mcp` 容器提供安全工具；默认关闭，
-不公布 Gateway/监控端口，不给任何 Agent 自动授权。复用 HTTP MCP、
-Skill 延迟加载、权限与审计，不安装 Kali 工具链到 ARTEX。
-支持 Windows 原生 ARTEX 连接 WSL 原生 Kali Gateway，以及两者同在 Linux
-原生运行；无需在 ARTEX 所在环境安装 Docker 或移植 Kali 工具到 Windows。
-启用、原生部署和隔离容器验收见 [Kali MCP 集成文档](docs/kali-mcp-integration.md)。
-
+ARTEX 不再安装、托管或自动注册 Kali Gateway。Kali 与其他外部 MCP 一样，
+由管理员在独立环境运行，再通过「系统 → MCP」配置连接、刷新工具和分配 Agent 可见权限。
+支持 stdio、Streamable HTTP 和 SSE；远端连接推荐验证证书的 HTTPS 与凭据引用。
+参见 [外部 MCP 接入说明](docs/external-mcp.md)。
 
 > 完整交互见[在线 Demo](https://artex-demo.mhtsec.com)（纯前端 + Mock 数据，无需后端）。
 

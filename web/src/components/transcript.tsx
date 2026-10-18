@@ -1,6 +1,7 @@
 "use client";
 
 import * as React from "react";
+import { createPortal } from "react-dom";
 import {
   CheckIcon,
   ChevronDown,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
+import { coalesceThinking } from "@/lib/activity-stream";
 import { Markdown } from "@/components/markdown";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -25,13 +27,7 @@ import { ApprovalDetail } from "@/components/approval-records";
 import type { Activity, InterceptPending } from "@/lib/types";
 
 // ---- per-agent lane color (planner + work#1/#2/#3 …) ---------------------------
-const workerColors = [
-  "bg-sky-600",
-  "bg-violet-600",
-  "bg-teal-600",
-  "bg-pink-600",
-  "bg-orange-600",
-];
+const workerColors = ["bg-sky-600", "bg-violet-600", "bg-teal-600", "bg-pink-600", "bg-orange-600"];
 function workerColor(name: string): string {
   if (name === "planner") return "bg-amber-600"; // the intent generator, distinct
   if (name === "mainagent") return "bg-primary";
@@ -81,13 +77,13 @@ type Group =
   | { type: "answer"; key: number; step: Activity }
   | { type: "round"; key: number; label: string }
   | { type: "tool"; key: number; worker: string; use?: Activity; result?: Activity }
-  | { type: "msg"; key: number; worker: string; steps: Activity[] }
+  | { type: "msg"; key: number | string; worker: string; steps: Activity[] }
   | { type: "intercept"; key: number; step: Activity };
 
 function groupSteps(steps: Activity[], chat: boolean): Group[] {
   const out: Group[] = [];
   const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
-  for (const s of steps) {
+  for (const s of coalesceThinking(steps)) {
     if (s.kind === "usage") continue; // live token-usage marker — not a rendered step
     if (s.kind === "round") {
       out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
@@ -124,7 +120,7 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
     }
     const last = out[out.length - 1];
     if (last && last.type === "msg" && last.worker === s.worker) last.steps.push(s);
-    else out.push({ type: "msg", key: s.seq, worker: s.worker, steps: [s] });
+    else out.push({ type: "msg", key: s.metadata?.stream_id ?? s.seq, worker: s.worker, steps: [s] });
   }
   return out;
 }
@@ -173,9 +169,7 @@ function toolInputText(tool: string, raw: string): string {
       return JSON.parse('"' + m[1] + '"');
     } catch {
       // truncated mid-escape — unescape the common sequences best-effort.
-      return m[1].replace(/\\(["\\/nrt])/g, (_s, c) =>
-        c === "n" ? "\n" : c === "r" ? "\r" : c === "t" ? "\t" : c,
-      );
+      return m[1].replace(/\\(["\\/nrt])/g, (_s, c) => (c === "n" ? "\n" : c === "r" ? "\r" : c === "t" ? "\t" : c));
     }
   }
   return raw;
@@ -184,13 +178,7 @@ function toolInputText(tool: string, raw: string): string {
 // InterceptCard renders an inline intercept_request approval card. The pending_id
 // is extracted from the summary (format: "工具 X 请求审批 (#N)") so buttons are
 // available immediately without waiting for the detail load.
-function InterceptCard({
-  step,
-  getDetail,
-}: {
-  step: Activity;
-  getDetail: (seq: number) => Promise<string>;
-}) {
+function InterceptCard({ step, getDetail }: { step: Activity; getDetail: (seq: number) => Promise<string> }) {
   // extract pending_id from summary: "工具 Bash 请求审批 (#42)"
   const pendingId = React.useMemo(() => {
     const m = /\(#(\d+)\)/.exec(step.summary);
@@ -217,25 +205,38 @@ function InterceptCard({
     getDetail(step.seq)
       .then((raw) => {
         if (!live || !raw) return;
-        try { setDetail(JSON.parse(raw)); } catch { /* ignore */ }
+        try {
+          setDetail(JSON.parse(raw));
+        } catch {
+          /* ignore */
+        }
       })
-      .catch(() => {/* ignore */});
-    return () => { live = false; };
+      .catch(() => {
+        /* ignore */
+      });
+    return () => {
+      live = false;
+    };
   }, [step.seq, getDetail]);
 
   // biome-ignore lint/correctness/useExhaustiveDependencies: Retry explicitly reloads the same approval after a failed request.
   React.useEffect(() => {
     if (!pendingId) return;
     let live = true;
-    api.interceptGetOne(pendingId)
+    api
+      .interceptGetOne(pendingId)
       .then((p) => {
         if (!live) return;
         setPending(p);
         setStatusError("");
         if (p.status !== "pending") setDecided(p.status as "allowed" | "denied" | "timeout");
       })
-      .catch((error) => { if (live) setStatusError((error as Error).message || "审批详情加载失败"); });
-    return () => { live = false; };
+      .catch((error) => {
+        if (live) setStatusError((error as Error).message || "审批详情加载失败");
+      });
+    return () => {
+      live = false;
+    };
   }, [pendingId, retry]);
 
   async function decide(decision: "allowed" | "denied") {
@@ -252,11 +253,11 @@ function InterceptCard({
     }
   }
 
-  const inputStr = detail?.input
-    ? JSON.stringify(detail.input).slice(0, 200)
-    : null;
+  const inputStr = detail?.input ? JSON.stringify(detail.input).slice(0, 200) : null;
 
-  const row = pending ? { ...pending, status: decided || pending.status, conv_title: "", conv_agent_key: "", rule_name: "" } : null;
+  const row = pending
+    ? { ...pending, status: decided || pending.status, conv_title: "", conv_agent_key: "", rule_name: "" }
+    : null;
 
   return (
     <div className="my-2 rounded-lg border border-amber-400/50 bg-amber-50/40 dark:bg-amber-950/15 p-3 text-xs">
@@ -269,27 +270,25 @@ function InterceptCard({
               <code className="rounded bg-amber-100 dark:bg-amber-900/50 px-1 font-mono text-amber-800 dark:text-amber-300">
                 {toolName}
               </code>
-              {pendingId && (
-                <span className="text-muted-foreground">#{pendingId}</span>
-              )}
+              {pendingId && <span className="text-muted-foreground">#{pendingId}</span>}
             </div>
-            {inputStr && (
-              <p className="font-mono text-muted-foreground truncate">{inputStr}</p>
-            )}
+            {inputStr && <p className="font-mono text-muted-foreground truncate">{inputStr}</p>}
           </div>
         </div>
 
         {step.inherited ? (
           <Badge variant="outline">历史记录 · 只读</Badge>
         ) : decided ? (
-          <span className={
-            "shrink-0 rounded px-2 py-0.5 text-[11px] font-medium " +
-            (decided === "allowed"
-              ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
-              : decided === "timeout"
-                ? "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
-                : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400")
-          }>
+          <span
+            className={
+              "shrink-0 rounded px-2 py-0.5 text-[11px] font-medium " +
+              (decided === "allowed"
+                ? "bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-400"
+                : decided === "timeout"
+                  ? "bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-400"
+                  : "bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-400")
+            }
+          >
             {decided === "allowed" ? "已允许" : decided === "timeout" ? "已超时" : "已拒绝"}
           </span>
         ) : (
@@ -338,9 +337,13 @@ function InterceptCard({
             ) : statusError ? (
               <div className="flex flex-wrap items-center gap-2 p-3" role="alert">
                 <span>{statusError}</span>
-                <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>重试详情</Button>
+                <Button variant="outline" size="sm" onClick={() => setRetry((value) => value + 1)}>
+                  重试详情
+                </Button>
               </div>
-            ) : <p className="p-3 text-muted-foreground">正在加载审批详情…</p>}
+            ) : (
+              <p className="p-3 text-muted-foreground">正在加载审批详情…</p>
+            )}
           </CollapsibleContent>
         </Collapsible>
       ) : null}
@@ -508,9 +511,7 @@ function MessageBlock({
     let live = true;
     void Promise.all(
       group.steps.map((s) =>
-        getDetail(s.seq)
-          .then((d) => d || s.summary)
-          .catch(() => s.summary),
+        (s.detail ? Promise.resolve(s.detail) : getDetail(s.seq)).then((d) => d || s.summary).catch(() => s.summary),
       ),
     ).then((parts) => {
       if (!live) return;
@@ -579,7 +580,15 @@ function parseUserBody(body: string): { text: string; attachments: MsgAttachment
   return { text: body, attachments: [] };
 }
 
-function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean; getDetail: (seq: number) => Promise<string> }) {
+function UserRow({
+  step,
+  intent,
+  getDetail,
+}: {
+  step: Activity;
+  intent?: boolean;
+  getDetail: (seq: number) => Promise<string>;
+}) {
   const Icon = intent ? CrosshairIcon : UserIcon;
   const [ref, inView] = useInView();
   // Optimistic echoes carry their detail inline; persisted rows lazy-load it on scroll.
@@ -625,7 +634,7 @@ function UserRow({ step, intent, getDetail }: { step: Activity; intent?: boolean
           </div>
         )}
         <div className="flex items-center gap-2">
-          {step.metadata?.delivery_mode && <span className="text-[10px] text-muted-foreground">{step.metadata.delivery_mode === "steer" ? "Steer" : "排队消息"}</span>}
+          {step.metadata?.delivery_mode === "steer" && <span className="text-[10px] text-muted-foreground">Steer</span>}
           <ActivityTime ts={step.ts} />
         </div>
       </div>
@@ -685,13 +694,65 @@ function ExecView({
   chat,
   fetchDetail,
   focusedSeq,
+  conversationId,
 }: {
   activity: Activity[];
   taskId?: string;
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
   focusedSeq?: number;
+  conversationId?: string;
 }) {
+  const [menu, setMenu] = React.useState<{ x: number; y: number; steps: Activity[] } | null>(null);
+  const [hidden, setHidden] = React.useState<Set<number>>(new Set());
+  // biome-ignore lint/correctness/useExhaustiveDependencies: scope changes must clear local hidden IDs even though the effect only resets state.
+  React.useEffect(() => {
+    setHidden(new Set());
+    setMenu(null);
+  }, [taskId, conversationId]);
+  React.useEffect(() => {
+    if (!menu) return;
+    const close = () => setMenu(null);
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", close);
+    window.addEventListener("scroll", close, true);
+    return () => {
+      window.removeEventListener("click", close);
+      window.removeEventListener("keydown", close);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [menu]);
+  async function exclude(step: Activity) {
+    if (!window.confirm("从后续模型上下文移除此内容？工具调用和结果会成对移除；原始审计记录保留。")) return;
+    try {
+      await api.excludeContext(step.seq, taskId, conversationId);
+      setHidden(
+        (old) =>
+          new Set([
+            ...old,
+            ...activity
+              .filter(
+                (a) =>
+                  a.seq === step.seq ||
+                  Boolean(
+                    step.tool_use_id &&
+                      a.tool_use_id === step.tool_use_id &&
+                      a.worker === step.worker &&
+                      a.intent_id === step.intent_id &&
+                      (a.main_seg ?? 0) === (step.main_seg ?? 0),
+                  ) ||
+                  Boolean(step.metadata?.stream_id && a.metadata?.stream_id === step.metadata.stream_id),
+              )
+              .map((a) => a.seq),
+          ]),
+      );
+      toast.success("已从后续上下文移除，将在下一个安全边界生效");
+    } catch (e) {
+      toast.error((e as Error).message);
+    }
+    setMenu(null);
+  }
+  const visible = activity.filter((a) => !a.metadata?.context_excluded && !hidden.has(a.seq));
   const showWorker = new Set(activity.map((a) => a.worker)).size > 1;
   // default detail fetcher: the task-scoped activity endpoint. The chat page passes
   // its own (conversation-scoped) fetcher instead.
@@ -701,31 +762,88 @@ function ExecView({
   );
   return (
     <div className="flex flex-col">
-      {groupSteps(activity, !!chat).map((g) =>
-        g.type === "round" ? (
-          <div key={"r" + g.key} className="my-2 flex items-center gap-2 text-[10px] font-medium text-muted-foreground">
-            <span className="h-px flex-1 bg-border" />
-            {g.label}
-            <span className="h-px flex-1 bg-border" />
-          </div>
-        ) : g.type === "user" ? (
-          <UserRow key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
-        ) : g.type === "answer" ? (
-          <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
-        ) : g.type === "tool" ? (
-          <ToolBlock
-            key={"t" + g.key}
-            group={g}
-            getDetail={getDetail}
-            showWorker={showWorker}
-            focused={focusedSeq != null && g.use?.seq === focusedSeq}
-          />
-        ) : g.type === "intercept" ? (
-          <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
-        ) : (
-          <MessageBlock key={"m" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
-        ),
-      )}
+      {groupSteps(visible, !!chat).map((g) => (
+        // biome-ignore lint/a11y/noStaticElementInteractions: this wrapper adds an optional context menu; existing child controls retain their keyboard semantics.
+        <div
+          key={`${g.type}-${g.key}`}
+          onContextMenu={(e) => {
+            const steps =
+              g.type === "tool"
+                ? ([g.use ?? g.result].filter(Boolean) as Activity[])
+                : g.type === "msg"
+                  ? g.steps
+                  : "step" in g
+                    ? [g.step]
+                    : [];
+            const selectable = steps.filter(
+              (a) => !a.inherited && ["user", "thinking", "tool_use", "tool_result", "text", "result"].includes(a.kind),
+            );
+            if (!selectable.length || (!taskId && !conversationId)) return;
+            e.preventDefault();
+            setMenu({
+              x: Math.min(e.clientX, window.innerWidth - 290),
+              y: Math.min(e.clientY, window.innerHeight - 200),
+              steps: selectable,
+            });
+          }}
+        >
+          {g.type === "round" ? (
+            <div
+              key={"r" + g.key}
+              className="my-2 flex items-center gap-2 text-[10px] font-medium text-muted-foreground"
+            >
+              <span className="h-px flex-1 bg-border" />
+              {g.label}
+              <span className="h-px flex-1 bg-border" />
+            </div>
+          ) : g.type === "user" ? (
+            <UserRow key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
+          ) : g.type === "answer" ? (
+            <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
+          ) : g.type === "tool" ? (
+            <ToolBlock
+              key={"t" + g.key}
+              group={g}
+              getDetail={getDetail}
+              showWorker={showWorker}
+              focused={focusedSeq != null && g.use?.seq === focusedSeq}
+            />
+          ) : g.type === "intercept" ? (
+            <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
+          ) : (
+            <MessageBlock key={"m" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
+          )}
+        </div>
+      ))}
+      {menu &&
+        createPortal(
+          <div
+            role="menu"
+            className="fixed z-[100] max-h-64 w-72 overflow-auto rounded-md border bg-popover p-1 text-sm shadow-lg"
+            style={{ left: menu.x, top: menu.y }}
+          >
+            {menu.steps.map((step) => (
+              <button
+                type="button"
+                key={step.seq}
+                role="menuitem"
+                className="block w-full truncate rounded p-2 text-left hover:bg-muted"
+                onClick={() => void exclude(step)}
+              >
+                从上下文移除：
+                {step.kind === "user"
+                  ? "用户输入"
+                  : step.kind === "thinking"
+                    ? "思考"
+                    : step.tool
+                      ? `命令 ${step.tool}`
+                      : "回复"}{" "}
+                #{step.seq}
+              </button>
+            ))}
+          </div>,
+          document.body,
+        )}
     </div>
   );
 }
@@ -740,6 +858,7 @@ export function Transcript({
   chat,
   fetchDetail,
   focusedSeq,
+  conversationId,
 }: {
   activity: Activity[];
   live?: boolean;
@@ -747,11 +866,15 @@ export function Transcript({
   chat?: boolean;
   fetchDetail?: (seq: number) => Promise<string>;
   focusedSeq?: number;
+  conversationId?: string;
 }) {
   const transcriptRef = React.useRef<HTMLDivElement>(null);
   const [focusPadding, setFocusPadding] = React.useState(0);
   React.useLayoutEffect(() => {
-    if (focusedSeq == null) { setFocusPadding(0); return; }
+    if (focusedSeq == null) {
+      setFocusPadding(0);
+      return;
+    }
     const viewport = transcriptRef.current?.closest('[data-slot="scroll-area-viewport"]');
     if (!viewport) return;
     const measure = () => setFocusPadding(viewport.clientHeight / 2);
@@ -761,8 +884,19 @@ export function Transcript({
     return () => observer.disconnect();
   }, [focusedSeq]);
   return (
-    <div ref={transcriptRef} className="flex flex-col gap-1" style={focusPadding ? { paddingBlock: focusPadding } : undefined}>
-      <ExecView activity={activity} taskId={taskId} chat={chat} fetchDetail={fetchDetail} focusedSeq={focusedSeq} />
+    <div
+      ref={transcriptRef}
+      className="flex flex-col gap-1"
+      style={focusPadding ? { paddingBlock: focusPadding } : undefined}
+    >
+      <ExecView
+        activity={activity}
+        taskId={taskId}
+        chat={chat}
+        fetchDetail={fetchDetail}
+        focusedSeq={focusedSeq}
+        conversationId={conversationId}
+      />
       {live && (
         <div className="flex items-center gap-2 pl-2 pt-1 text-xs text-muted-foreground">
           <span className="flex gap-1">

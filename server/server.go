@@ -248,7 +248,6 @@ func New(ctx context.Context, m *Manager, skillDir string, dataDir string, keyDi
 		// Fill the tool cache for any enabled MCP that has none yet (notably the
 		// seeded browser MCP on first run). Async so it never blocks startup.
 		go s.discoverEmptyMCPsOnStartup()
-		go s.runKaliMCP()
 		logSink.SetDB(ctx, m.pg) // restore last 100 log rows and enable async persistence
 	}
 	// precedence: persisted DB config > env.
@@ -798,6 +797,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("POST /api/exploration/main-session/new", s.newMainSession)
 	mux.HandleFunc("GET /api/exploration/activity/stream", s.streamActivity)
 	mux.HandleFunc("GET /api/exploration/activity/{seq}", s.activityDetail)
+	mux.HandleFunc("POST /api/exploration/activity/{seq}/exclude-context", s.excludeContext)
+	mux.HandleFunc("POST /api/conversations/{id}/messages/{seq}/exclude-context", s.excludeContext)
 	mux.HandleFunc("GET /api/exploration/tokens", s.tokenStats)
 	mux.HandleFunc("GET /api/tokens/daily", s.tokenDailyStats)
 	mux.HandleFunc("GET /api/tokens/conversations", s.conversationTokens)
@@ -3915,7 +3916,7 @@ func (s *Server) taskChatStatus(w http.ResponseWriter, r *http.Request) {
 	s.chatMu.Lock()
 	running := s.chatBusy[t.ID]
 	s.chatMu.Unlock()
-	writeJSON(w, http.StatusOK, map[string]bool{"running": running})
+	writeJSON(w, http.StatusOK, map[string]bool{"running": running, "planner_running": s.engine.plannerBusy(t.ID)})
 }
 
 // stopChat aborts the in-flight main-agent turn for a task (manual stop button).
