@@ -52,6 +52,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSideQuestions } from "@/hooks/use-side-questions";
+import { advanceActivityUnread, type ActivityUnreadState } from "@/lib/activity-stream";
 import type { AgentMessageMode } from "@/lib/api";
 import { api, sseUrl } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
@@ -118,14 +119,13 @@ function workerMessageCharCount(value: string): number {
 // One session's lazily-loaded, reverse-paginated cache. `lastTs`/`unread` are kept
 // live even for sessions that were never opened, so the list shows liveness + unread
 // without holding their full history.
-type SessionState = {
+type SessionState = ActivityUnreadState & {
   items: Activity[];
   loaded: boolean;
   loading: boolean;
   loadingMore: boolean;
   hasMore: boolean; // older history remains above the loaded window
   earliestSeq: number; // earliest loaded id — reverse-pagination anchor
-  unread: number;
   lastTs: string; // most-recent activity time (drives live badge; updated even when unloaded)
   error?: string;
 };
@@ -140,6 +140,7 @@ function emptyState(): SessionState {
     hasMore: false,
     earliestSeq: 0,
     unread: 0,
+    unreadSeq: 0,
     lastTs: "",
   };
 }
@@ -409,7 +410,10 @@ function SessionItem({
         )}
         {hasPending && <ShieldAlertIcon className="size-3.5 shrink-0 text-amber-500" />}
         {!active && unread ? (
-          <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400">
+          <span
+            title={`${unread} 条未读活动（思考按完整块统计）`}
+            className="inline-flex min-w-4 items-center justify-center rounded-full bg-blue-500/15 px-1 text-[10px] font-medium tabular-nums text-blue-600 dark:text-blue-400"
+          >
             {unread > 99 ? "99+" : unread}
           </span>
         ) : null}
@@ -1014,6 +1018,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           setStore((prev) => {
             const cur = prev[k] ?? emptyState();
             const activeK = activeKeyRef.current;
+            const unreadState = advanceActivityUnread(cur, a, k === activeK);
             // Merge into sessions that are loaded, actively loading, or the current
             // view (so returning is instant + a frame that lands mid-load isn't lost).
             // A cold, inactive session also keeps a tiny accounting tail so the
@@ -1023,7 +1028,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
               return {
                 ...prev,
-                [k]: { ...cur, items: accountingItems, lastTs: a.ts, unread: cur.unread + 1 },
+                [k]: { ...cur, items: accountingItems, lastTs: a.ts, ...unreadState },
               };
             }
             let items = mergeBySeq(cur.items, [a]);
@@ -1037,8 +1042,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               hasMore = true;
               earliestSeq = items[0].seq;
             }
-            const unread = k === activeK ? 0 : cur.unread + 1;
-            return { ...prev, [k]: { ...cur, items, lastTs: a.ts, unread, hasMore, earliestSeq } };
+            return { ...prev, [k]: { ...cur, items, lastTs: a.ts, ...unreadState, hasMore, earliestSeq } };
           });
         };
       })
