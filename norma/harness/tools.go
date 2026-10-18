@@ -28,6 +28,9 @@ func acceptsRawInput(t tool.CoreTool) bool {
 func (l *loop) execOne(use llm.ContentBlock, emitProgress func(tool.ProgressInfo)) (llm.ContentBlock, []llm.Message) {
 	t, ok := l.in.Tools.Get(use.Name)
 	if !ok {
+		if l.in.UnavailableToolReason != "" {
+			return llm.ToolResultText(use.ID, fmt.Sprintf("Error: tool %q is unavailable in this turn. %s", use.Name, l.in.UnavailableToolReason), true), nil
+		}
 		return llm.ToolResultText(use.ID, fmt.Sprintf("Error: unknown tool %q", use.Name), true), nil
 	}
 	input := use.Input

@@ -21,15 +21,19 @@ import (
 
 // All model work is synthetic. No shell/network tool, target, or API key.
 type mainBatchProvider struct {
-	mu            sync.Mutex
-	dispatch      bool
-	separateCalls bool
-	humanCalls    int
-	workerCalls   int
-	autoCalls     int
-	autoMessage   string
-	badTools      []string
-	blockAuto     chan struct{}
+	mu               sync.Mutex
+	dispatch         bool
+	separateCalls    bool
+	humanCalls       int
+	workerCalls      int
+	autoCalls        int
+	autoMessage      string
+	autoSystem       string
+	probeUnavailable bool
+	rejected         []string
+	humanTools       map[string]bool
+	badTools         []string
+	blockAuto        chan struct{}
 }
 
 func (p *mainBatchProvider) Complete(ctx context.Context, req llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
@@ -53,14 +57,33 @@ func (p *mainBatchProvider) Complete(ctx context.Context, req llm.CompletionRequ
 	if strings.HasPrefix(message, "【系统自动回传") {
 		p.autoCalls++
 		p.autoMessage = message
+		p.autoSystem = strings.Join(req.System, "\n")
 		for _, tool := range req.Tools {
 			switch tool.Name {
-			case "sleep", "Bash", "add_intent", "set_goals", "steer_work", "WebFetch", "web_search", "TaskStop", "Monitor", "ExecuteExtraTool":
+			case "sleep", "Bash", "add_intent", "add_task_scope", "set_goals", "steer_work", "WebFetch", "web_search", "TaskStop", "Monitor", "ExecuteExtraTool":
 				p.badTools = append(p.badTools, tool.Name)
+			}
+		}
+		probe := p.probeUnavailable && p.autoCalls == 1
+		if p.probeUnavailable {
+			for _, msg := range req.Messages {
+				for _, block := range msg.Content {
+					if block.Type == llm.BlockToolResult && block.IsError && strings.HasPrefix(block.ToolUseID, "fixture-unavailable-") {
+						for _, content := range block.Content {
+							p.rejected = append(p.rejected, content.Text)
+						}
+					}
+				}
 			}
 		}
 		wait := p.blockAuto
 		p.mu.Unlock()
+		if probe {
+			return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{
+				{Type: llm.BlockToolUse, ID: "fixture-unavailable-intent", Name: "add_intent", Input: json.RawMessage(`{"summary":"must not dispatch"}`)},
+				{Type: llm.BlockToolUse, ID: "fixture-unavailable-scope", Name: "add_task_scope", Input: json.RawMessage(`{}`)},
+			}}, "tool_use", llm.Usage{}, nil
+		}
 		if wait != nil {
 			select {
 			case <-wait:
@@ -71,6 +94,10 @@ func (p *mainBatchProvider) Complete(ctx context.Context, req llm.CompletionRequ
 		return text("自动汇总：两项隔离测试结果已收到，无需 sleep。")
 	}
 	p.humanCalls++
+	p.humanTools = map[string]bool{}
+	for _, tool := range req.Tools {
+		p.humanTools[tool.Name] = true
+	}
 	first := p.dispatch && p.humanCalls == 1
 	p.mu.Unlock()
 	if first {
@@ -191,6 +218,47 @@ func mainBatchSealed(t *testing.T, s *Server, task *Task) {
 		s.chatMu.Unlock()
 		return n == 1 && !busy
 	})
+}
+
+func TestMainWorkerCompletionUnavailableToolsExplainReadOnly(t *testing.T) {
+	for _, nonStreaming := range []bool{false, true} {
+		t.Run(fmt.Sprintf("nonstreaming-%v", nonStreaming), func(t *testing.T) {
+			p := &mainBatchProvider{probeUnavailable: true}
+			s, task := mainBatchFixture(t, p)
+			ma := s.taskAgents[task.ID].main
+			ma.SetNonStreaming(func() bool { return nonStreaming })
+			ctx := agent.WithMainWorkerCompletion(t.Context())
+			_, err := ma.Chat(ctx, taskNumericID(task.ID), 0, s.m.Assets(), task.Store, "fixture goal", "【系统自动回传，不是人类新消息】fixture", nil, nil, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if p.autoCalls != 2 || len(p.rejected) != 2 || len(p.badTools) != 0 {
+				t.Fatalf("auto calls=%d rejected=%v bad=%v", p.autoCalls, p.rejected, p.badTools)
+			}
+			for _, result := range p.rejected {
+				if !strings.Contains(result, "只读汇总回合") || !strings.Contains(result, "不是工具注册故障") || strings.Contains(result, "unknown tool") {
+					t.Fatal("misleading missing-tool diagnostic", result)
+				}
+			}
+			if !strings.Contains(p.autoSystem, "当前模式：Worker 批次自动回传／只读汇总") || !strings.Contains(p.autoSystem, "当前实际可用的只读工具：") || strings.Contains(p.autoSystem, "本轮 add_intent 创建的全部意图") {
+				t.Fatal("auto report inherited dispatch prompt", p.autoSystem)
+			}
+			if intents, err := task.Store.ListByKind(db.KindIntent, 10); err != nil || len(intents) != 0 {
+				t.Fatal("restricted report dispatched work", intents, err)
+			}
+			// The same MainAgent and restored transcript must not leak read-only
+			// options into the next genuine human turn.
+			_, err = ma.Chat(t.Context(), taskNumericID(task.ID), 0, s.m.Assets(), task.Store, "fixture goal", "human fixture follow-up", nil, nil, nil, nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, name := range []string{"add_intent", "add_task_scope", "Bash"} {
+				if !p.humanTools[name] {
+					t.Fatal("new human turn lost tool", name)
+				}
+			}
+		})
+	}
 }
 
 func TestMainWorkerBatchActualChatIdleAndCompletedGoal(t *testing.T) {

@@ -38,6 +38,10 @@ type Options struct {
 
 	// Tools the agent may call. Defaults to tool.DefaultTools().
 	Tools []tool.CoreTool
+	// UnavailableToolReason explains a host-imposed turn restriction when the
+	// model calls a tool absent from Tools. It never registers or executes tools.
+	// Empty preserves the default unknown-tool error.
+	UnavailableToolReason string
 
 	// DeferredTools names tools whose schemas are withheld from the model (only
 	// their names surface, e.g. via tool.RenderDeferredToolsBlock placed in the
@@ -485,35 +489,36 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		reminderExtra = s.opts.SystemReminderFunc()
 	}
 	in := harness.QueryInput{
-		Provider:           s.opts.Provider,
-		System:             s.system(),
-		DynamicBoundary:    s.opts.DynamicBoundary,
-		Messages:           s.messages,
-		SystemReminder:     buildSystemReminder(reminderExtra),
-		Tools:              s.registry,
-		DeferredTools:      s.opts.DeferredTools,
-		MaxTokens:          s.opts.MaxTokens,
-		Temperature:        s.opts.Temperature,
-		MaxTurns:           s.opts.MaxTurns,
-		MaxDuration:        s.opts.MaxDuration,
-		Settlement:         s.opts.Settlement,
-		MaxConcurrency:     s.opts.MaxConcurrency,
-		WorkingDir:         s.opts.WorkingDir,
-		Todos:              s.opts.Todos,
-		ToolOutputDir:      s.opts.ToolOutputDir,
-		MaxToolOutputChars: s.opts.MaxToolOutputChars,
-		Tasks:              s.tasks,
-		BashEnv:            s.opts.BashEnv,
-		PermissionMode:     s.opts.PermissionMode,
-		Allowed:            s.opts.AllowedTools,
-		Disallowed:         s.opts.DisallowedTools,
-		CanUseTool:         s.opts.CanUseTool,
-		Hooks:              s.opts.Hooks,
-		PendingMessages:    s.opts.PendingMessages,
-		Compactor:          s.compactor,
-		TokenBudget:        s.opts.TokenBudget,
-		EscalateMaxTokens:  s.opts.EscalateMaxTokens,
-		NonStreaming:       s.opts.NonStreaming,
+		Provider:              s.opts.Provider,
+		System:                s.system(),
+		DynamicBoundary:       s.opts.DynamicBoundary,
+		Messages:              s.messages,
+		SystemReminder:        buildSystemReminder(reminderExtra),
+		Tools:                 s.registry,
+		UnavailableToolReason: s.opts.UnavailableToolReason,
+		DeferredTools:         s.opts.DeferredTools,
+		MaxTokens:             s.opts.MaxTokens,
+		Temperature:           s.opts.Temperature,
+		MaxTurns:              s.opts.MaxTurns,
+		MaxDuration:           s.opts.MaxDuration,
+		Settlement:            s.opts.Settlement,
+		MaxConcurrency:        s.opts.MaxConcurrency,
+		WorkingDir:            s.opts.WorkingDir,
+		Todos:                 s.opts.Todos,
+		ToolOutputDir:         s.opts.ToolOutputDir,
+		MaxToolOutputChars:    s.opts.MaxToolOutputChars,
+		Tasks:                 s.tasks,
+		BashEnv:               s.opts.BashEnv,
+		PermissionMode:        s.opts.PermissionMode,
+		Allowed:               s.opts.AllowedTools,
+		Disallowed:            s.opts.DisallowedTools,
+		CanUseTool:            s.opts.CanUseTool,
+		Hooks:                 s.opts.Hooks,
+		PendingMessages:       s.opts.PendingMessages,
+		Compactor:             s.compactor,
+		TokenBudget:           s.opts.TokenBudget,
+		EscalateMaxTokens:     s.opts.EscalateMaxTokens,
+		NonStreaming:          s.opts.NonStreaming,
 	}
 	if s.writer != nil {
 		in.Recorder = s.writer

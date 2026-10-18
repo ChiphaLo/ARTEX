@@ -28,6 +28,9 @@ type QueryInput struct {
 	// fresh per Prompt call so it never accumulates across turns.
 	SystemReminder string
 	Tools          *tool.Registry
+	// UnavailableToolReason is host-authored context for missing-tool errors;
+	// it is diagnostic only and does not change registry or permissions.
+	UnavailableToolReason string
 	// DeferredTools names tools whose schemas are withheld from the model's tool
 	// list (they stay in Tools and are invoked via ExecuteExtraTool). Empty = all
 	// tool schemas sent as usual.
