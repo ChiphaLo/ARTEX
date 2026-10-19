@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"iter"
@@ -89,7 +90,8 @@ type QueryInput struct {
 	// The callback must be concurrency-safe and must not return Queue messages.
 	PendingMessages func(context.Context) []llm.Message
 	// Compactor is optional context-window management. Nil disables it.
-	Compactor Compactor
+	Compactor     Compactor
+	ContextWindow int // final FIFO request guard, including system/tools/output reserve
 	// Recorder, when non-nil, is notified as the conversation grows so a host can
 	// persist a transcript. It fires for genuinely new messages (births) in
 	// order, and for compaction boundaries; it is never called for compaction's
@@ -369,6 +371,9 @@ func (l *loop) maxTokens() int {
 	if l.in.MaxTokens > 0 {
 		return l.in.MaxTokens
 	}
+	if l.in.ContextWindow > 0 {
+		return min(32768, max(1, l.in.ContextWindow/4))
+	}
 	return 32768
 }
 
@@ -450,6 +455,10 @@ func (l *loop) run() {
 				return
 			}
 			// Reactive recovery from prompt-too-long: one forced AutoCompact, then retry.
+			if errors.Is(streamErr, ErrContextWindow) {
+				l.finish(ReasonPromptTooLong, streamErr, "")
+				return
+			}
 			if l.in.Compactor != nil && l.in.Compactor.IsOverflow(streamErr) && !l.hasAttemptedReactiveCompact {
 				l.hasAttemptedReactiveCompact = true
 				if msgs, ok := l.in.Compactor.Reactive(l.ctx, l.messages); ok {
@@ -921,6 +930,21 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		Tools:           schemas,
 		MaxTokens:       l.maxTokens(),
 		Temperature:     l.in.Temperature,
+	}
+	if l.in.ContextWindow > 0 {
+		protectedPrefix := 0
+		if l.in.SystemReminder != "" {
+			protectedPrefix = 1
+		}
+		var usage ContextUsage
+		req, usage, err = trimContextRequest(req, l.in.ContextWindow, protectedPrefix)
+		if !l.emit(Event{Kind: KindContextUsage, Context: &usage}) {
+			consumerStopped = true
+			return
+		}
+		if err != nil {
+			return
+		}
 	}
 	if l.in.NonStreaming {
 		return l.completeAndExecute(req)

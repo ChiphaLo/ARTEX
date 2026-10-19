@@ -30,6 +30,7 @@ import { toast } from "sonner";
 import { AgentInbox, useInboxRequestID } from "@/components/agent-inbox";
 import { AgentContinueButton, PlannerComposer } from "@/components/agent-run-controls";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
+import { ContextWindowIndicator } from "@/components/context-window-indicator";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
@@ -52,7 +53,7 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSideQuestions } from "@/hooks/use-side-questions";
-import { advanceActivityUnread, type ActivityUnreadState } from "@/lib/activity-stream";
+import { type ActivityUnreadState, advanceActivityUnread } from "@/lib/activity-stream";
 import type { AgentMessageMode } from "@/lib/api";
 import { api, sseUrl } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
@@ -1025,7 +1026,9 @@ export function SessionsTab({ taskId }: { taskId: string }) {
             // sidebar can add the latest unfinished usage without loading history.
             if (!cur.loaded && !cur.loading && k !== activeK) {
               const accountingItems =
-                a.kind === "usage" || a.kind === "result" ? mergeBySeq(cur.items, [a]).slice(-4) : cur.items;
+                a.kind === "usage" || a.kind === "result" || a.kind === "context_usage"
+                  ? mergeBySeq(cur.items, [a]).slice(-4)
+                  : cur.items;
               return {
                 ...prev,
                 [k]: { ...cur, items: accountingItems, lastTs: a.ts, ...unreadState },
@@ -1773,6 +1776,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                 );
               })()}
               <SideQuestionButton side={side} />
+              <ContextWindowIndicator activity={activity} />
               {activeResolution && (
                 <Tooltip>
                   <TooltipTrigger asChild>

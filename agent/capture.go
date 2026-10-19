@@ -46,7 +46,11 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	defer auditTrace.Finish()
 	var reason harness.TerminalReason
 	defer func() { reportRunOutcome(ctx, reason) }()
+	var lastContext *harness.ContextUsage
 	rec := func(r db.Activity) {
+		if lastContext != nil && (r.Kind == "usage" || r.Kind == "result") && len(r.Metadata) == 0 {
+			r.Metadata, _ = json.Marshal(map[string]any{"context_usage": lastContext})
+		}
 		if r.Kind == "text" || r.Kind == "tool_result" {
 			auditTrace.Append(db.InterceptContextEntry{Kind: r.Kind, Tool: r.Tool, ToolUseID: r.ToolUseID, Text: r.Detail, IsError: r.IsError})
 		}
@@ -131,6 +135,13 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			return finalText, reason, err
 		}
 		switch ev.Kind {
+		case harness.KindContextUsage:
+			if ev.Context != nil {
+				flush()
+				lastContext = ev.Context
+				metadata, _ := json.Marshal(map[string]any{"context_usage": ev.Context})
+				rec(db.Activity{Kind: "context_usage", Metadata: metadata})
+			}
 		case harness.KindRetry:
 			flush()
 			rec(db.Activity{Kind: "retry", Summary: ev.Text, Detail: ev.Text})

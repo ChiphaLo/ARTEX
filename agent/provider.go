@@ -22,7 +22,6 @@ import (
 
 	"github.com/Autumn-27/artex/llmrec"
 	"github.com/Autumn-27/norma/agentcore"
-	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
 	acperm "github.com/Autumn-27/norma/permission"
 	"github.com/Autumn-27/norma/transcript"
@@ -99,18 +98,15 @@ type RetryConfig struct {
 	StreamInterval time.Duration
 }
 
-// compaction window resolution bounds (in K tokens). Below the floor the
-// threshold math (window − summary reserve − buffer) would go non-positive and
-// compaction would fire every turn; above the cap it would never fire.
+// Context-window resolution bounds (K tokens), including output/safety reserve.
 const (
 	defaultWindowK = 200  // unset → assume a 200K window (Claude default)
 	minWindowK     = 32   // floor so effectiveWindow stays comfortably positive
 	maxWindowK     = 1000 // cap at 1M tokens (user request)
 )
 
-// CompactionWindow returns the model context window in TOKENS for compaction
-// thresholds, resolved from the user-configured size (ContextWindowK). 0/unset →
-// a 200K default; otherwise clamped to [32K, 1M] so compaction stays effective.
+// CompactionWindow retains its public name for compatibility. It resolves the
+// FIFO context budget in tokens: 0/unset → 200K, otherwise clamped to [32K, 1M].
 func (c Config) CompactionWindow() int {
 	k := c.ContextWindowK
 	if k <= 0 {
@@ -125,14 +121,12 @@ func (c Config) CompactionWindow() int {
 	return k * 1000
 }
 
-// compactionConfig builds the agent-core compaction config for a context window
-// in tokens. agentcore.NewSession wires the summarizer (same provider) when this
-// is set on Options.Compaction.
-func compactionConfig(windowTokens int) *compaction.Config {
+// contextWindowTokens applies the same default to every agent's FIFO guard.
+func contextWindowTokens(windowTokens int) int {
 	if windowTokens <= 0 {
 		windowTokens = defaultWindowK * 1000
 	}
-	return &compaction.Config{ContextWindow: windowTokens}
+	return windowTokens
 }
 
 // FromEnv resolves the LLM provider config:

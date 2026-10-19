@@ -69,6 +69,9 @@ type Options struct {
 	// Compaction, when non-nil, enables automatic context-window management,
 	// summarizing with the same Provider. Ignored when Compactor is set.
 	Compaction *compaction.Config
+	// ContextWindow enables final FIFO request trimming without deleting history.
+	// Positive values replace built-in LLM summarization; 0 keeps legacy behavior.
+	ContextWindow int
 
 	// Compactor lets the host take over context management entirely. Setting it
 	// means "I manage the context myself": the built-in Compaction is IGNORED.
@@ -269,7 +272,7 @@ func NewSession(opts Options) *Session {
 				"They are mutually exclusive context managers; set only one.")
 		}
 		s.compactor = opts.Compactor
-	} else if opts.Compaction != nil {
+	} else if opts.Compaction != nil && opts.ContextWindow <= 0 {
 		s.compactor = compaction.New(*opts.Compaction, compaction.ProviderSummarizer(opts.Provider, opts.MaxTokens, opts.NonStreaming))
 	}
 	if opts.Plan != nil {
@@ -516,6 +519,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		Hooks:                 s.opts.Hooks,
 		PendingMessages:       s.opts.PendingMessages,
 		Compactor:             s.compactor,
+		ContextWindow:         s.opts.ContextWindow,
 		TokenBudget:           s.opts.TokenBudget,
 		EscalateMaxTokens:     s.opts.EscalateMaxTokens,
 		NonStreaming:          s.opts.NonStreaming,

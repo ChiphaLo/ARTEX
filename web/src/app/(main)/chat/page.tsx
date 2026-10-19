@@ -25,6 +25,7 @@ import { toast } from "sonner";
 import { AgentInbox, useInboxRequestID } from "@/components/agent-inbox";
 import { AgentContinueButton } from "@/components/agent-run-controls";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
+import { ContextWindowIndicator } from "@/components/context-window-indicator";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
@@ -831,6 +832,7 @@ function ChatView({
         )}
         {running && <LiveBadge />}
         <SideQuestionButton side={side} />
+        <ContextWindowIndicator activity={messages} />
         <div className="text-muted-foreground ml-auto flex min-w-0 max-w-full items-center justify-end gap-x-3 gap-y-1 text-xs max-sm:w-full max-sm:flex-wrap">
           {tokenTotal.turns > 0 && (
             <span title="agent 循环轮次（模型调用次数）" className="tabular-nums">

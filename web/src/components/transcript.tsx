@@ -84,7 +84,7 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
   const out: Group[] = [];
   const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
   for (const s of coalesceThinking(steps)) {
-    if (s.kind === "usage") continue; // live token-usage marker — not a rendered step
+    if (s.kind === "usage" || s.kind === "context_usage") continue; // usage markers are not messages
     if (s.kind === "round") {
       out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
       continue;

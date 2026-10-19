@@ -646,7 +646,7 @@ function ProfileSheet({
           </div>
           <p className="-mt-2 text-muted-foreground text-xs">
             限速 0 = 不限，全 Agent 共享。上下文窗口单位 K（千 token），0 = 默认 200K，上限 1000（即
-            1M）；设太高会导致压缩不触发。
+            1M）。发送前按预算裁剪最旧的上下文，并预留输出空间；原始记录不删除。请勿设得高于模型实际容量。
           </p>
 
           <div className="grid gap-3 rounded-lg border p-3">
@@ -697,8 +697,8 @@ function ProfileSheet({
                   输出上限 · max tokens
                 </Label>
                 <p className="text-muted-foreground text-xs">
-                  单次回复最多生成多少 token，随每次请求发出。0（默认）= 不发送该字段，由服务端默认值决定。
-                  这与上面的「上下文窗口」是两回事：那是模型总容量，只在本地用来算压缩阈值。
+                  单次回复最多生成多少 token，随每次请求发出。0（默认）= 自动预留输出预算，最多 32K 且不超过上下文窗口的四分之一。
+                  这与上面的「上下文窗口」是两回事：窗口是输入与输出的总预算，超出时会先裁剪最旧的上下文。
                   设太小会让推理模型在思考阶段就被截断，一个字答案都出不来。
                 </p>
               </div>

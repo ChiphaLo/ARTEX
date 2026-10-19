@@ -463,10 +463,10 @@ func (w *Worker) execute(ctx context.Context, name string, taskID int64, as *db.
 		// large tool output spills to cmd-output/ with a head + pointer (SDK tool.Capture);
 		// full output preserved on disk. 截断上限用 SDK 默认(30000 字符)。
 		ToolOutputDir: cmdOutDir(runDir),
-		Compaction:    compactionConfig(w.compactionWindow()), // long tool-heavy runs stay within the window
-		Todos:         actool.NewTodoStore(),                  // 会话级临时待办（TodoWrite），纯规划用，退出即丢
-		NonStreaming:  w.nonStreaming(),                       // 该 profile 选非流式时走 Provider.Complete
-		MaxTokens:     w.maxTokens(),                          // 0 = 不发上限,由服务端默认值决定
+		ContextWindow: contextWindowTokens(w.compactionWindow()),
+		Todos:         actool.NewTodoStore(), // 会话级临时待办（TodoWrite），纯规划用，退出即丢
+		NonStreaming:  w.nonStreaming(),      // 该 profile 选非流式时走 Provider.Complete
+		MaxTokens:     w.maxTokens(),         // 0 = 自动预算,最多 32K 且不超过窗口的四分之一
 	}
 	if hooks != nil { // typed-nil guard: only set when concrete (avoids harness panic)
 		opts.Hooks = hooks

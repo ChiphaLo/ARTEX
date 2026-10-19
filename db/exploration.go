@@ -1525,7 +1525,7 @@ func (s *ExplorationStore) ActivityListForTerminalIntent(nodeID, sinceID int64, 
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND a.id>$3
 	  AND n.kind='intent' AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage')
+	  AND a.kind NOT IN ('thinking','usage','context_usage')
 	ORDER BY a.id LIMIT $4`, s.expID, nodeID, sinceID, limit)
 	if err != nil {
 		return nil, sinceID, err
@@ -1646,7 +1646,7 @@ func (s *ExplorationStore) ActivityPageForTerminalIntent(nodeID, before int64, l
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2
 	  AND n.kind='intent' AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage')
+	  AND a.kind NOT IN ('thinking','usage','context_usage')
 	  AND ($3 <= 0 OR a.id < $3)
 	ORDER BY a.id DESC LIMIT $4`, s.expID, nodeID, before, limit+1)
 	if err != nil {
@@ -1768,7 +1768,7 @@ func scanTrace(rows *sql.Rows) ([]Activity, error) {
 const traceCols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(summary,'')`
 
 // ActivityTrace lists one work's steps (by intent/node id) for the trace tools:
-// summaries only (detail is lazy — fetch via ActivityByIDs). thinking/usage rows
+// summaries only (detail is lazy — fetch via ActivityByIDs). thinking/usage/context_usage rows
 // are dropped so the caller sees the work's actions + observations, not the
 // model's internal reasoning or token-accounting noise.
 func (s *ExplorationStore) ActivityTrace(nodeID int64, limit int) ([]Activity, error) {
@@ -1776,7 +1776,7 @@ func (s *ExplorationStore) ActivityTrace(nodeID int64, limit int) ([]Activity, e
 		limit = 500
 	}
 	rows, err := s.db.Query(`SELECT `+traceCols+`
-FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage')
+FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage','context_usage')
 ORDER BY id LIMIT $3`, s.expID, nodeID, limit)
 	if err != nil {
 		return nil, err
@@ -1796,7 +1796,7 @@ func (s *ExplorationStore) ActivityTraceForTerminalIntent(nodeID int64, limit in
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage')
+	  AND a.kind NOT IN ('thinking','usage','context_usage')
 	ORDER BY a.id LIMIT $3`, s.expID, nodeID, limit)
 	if err != nil {
 		return nil, err
@@ -1808,7 +1808,7 @@ func (s *ExplorationStore) ActivityTraceForTerminalIntent(nodeID int64, limit in
 // ActivityTraceSearch finds steps whose summary OR detail matches q
 // (case-insensitive), returning summaries only. nodeID != nil scopes to one work;
 // nil searches across ALL works (node_id IS NOT NULL — planner/main steps have no
-// node_id, so this cleanly means "worker traces"). thinking/usage rows dropped.
+// node_id, so this cleanly means "worker traces"). thinking/usage/context_usage rows dropped.
 func (s *ExplorationStore) ActivityTraceSearch(nodeID *int64, q string, limit int) ([]Activity, error) {
 	if limit <= 0 {
 		limit = 100
@@ -1818,11 +1818,11 @@ func (s *ExplorationStore) ActivityTraceSearch(nodeID *int64, q string, limit in
 	var err error
 	if nodeID != nil {
 		rows, err = s.db.Query(`SELECT `+traceCols+`
-FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage')
+FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage','context_usage')
 AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, *nodeID, like, limit)
 	} else {
 		rows, err = s.db.Query(`SELECT `+traceCols+`
-FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND kind NOT IN ('thinking','usage')
+FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND kind NOT IN ('thinking','usage','context_usage')
 AND (summary ILIKE $2 OR detail ILIKE $2) ORDER BY id LIMIT $3`, s.expID, like, limit)
 	}
 	if err != nil {
@@ -1844,7 +1844,7 @@ func (s *ExplorationStore) ActivityTraceSearchForTerminalIntent(nodeID int64, q 
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage')
+	  AND a.kind NOT IN ('thinking','usage','context_usage')
 	  AND (a.summary ILIKE $3 OR a.detail ILIKE $3)
 	ORDER BY a.id LIMIT $4`, s.expID, nodeID, like, limit)
 	if err != nil {
@@ -1866,7 +1866,7 @@ func (s *ExplorationStore) ActivityTraceSearchTerminalIntents(q string, limit in
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 	WHERE a.exploration_id=$1 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.kind NOT IN ('thinking','usage')
+	  AND a.kind NOT IN ('thinking','usage','context_usage')
 	  AND (a.summary ILIKE $2 OR a.detail ILIKE $2)
 	ORDER BY a.id LIMIT $3`, s.expID, like, limit)
 	if err != nil {
@@ -1937,7 +1937,7 @@ func (s *ExplorationStore) ActivityTraceSearchExcluding(excludeNodeID int64, q s
 	like := "%" + q + "%"
 	rows, err := s.db.Query(`SELECT `+traceCols+`
 FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND node_id <> $2
-AND kind NOT IN ('thinking','usage')
+AND kind NOT IN ('thinking','usage','context_usage')
 AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, excludeNodeID, like, limit)
 	if err != nil {
 		return nil, err
@@ -1947,7 +1947,7 @@ AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, exclud
 }
 
 // ActivityByIDs loads full detail for specific step ids (the trace drill-down),
-// scoped to this exploration. thinking rows are skipped (never returned, even if
+// scoped to this exploration. Reasoning/context metadata rows are skipped (even if
 // their id is asked for). Order is ascending id, not the input order.
 func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 	if len(ids) == 0 {
@@ -1961,7 +1961,7 @@ func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 		args[i+1] = id
 	}
 	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(detail,'')
-FROM activity WHERE exploration_id=$1 AND kind<>'thinking' AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
+FROM activity WHERE exploration_id=$1 AND kind NOT IN ('thinking','context_usage') AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1995,7 +1995,7 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.detail,'')
 	FROM activity a
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
-		WHERE a.exploration_id=$1 AND a.kind NOT IN ('thinking','usage') AND n.kind='intent'
+		WHERE a.exploration_id=$1 AND a.kind NOT IN ('thinking','usage','context_usage') AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
 	  AND a.id IN (`+strings.Join(ph, ",")+`) ORDER BY a.id`, args...)
 	if err != nil {

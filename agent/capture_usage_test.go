@@ -13,10 +13,45 @@ import (
 	"github.com/Autumn-27/norma/agentcore"
 	"github.com/Autumn-27/norma/harness"
 	"github.com/Autumn-27/norma/llm"
+	actool "github.com/Autumn-27/norma/tool"
 )
 
 type captureUsageProvider struct {
 	stream func(context.Context, func(llm.StreamEvent, error) bool)
+}
+
+func TestCaptureContextUsageIsSeparateFromBillingAndSurvivesFinalResult(t *testing.T) {
+	provider := captureUsageProvider{stream: func(_ context.Context, y func(llm.StreamEvent, error) bool) {
+		for _, ev := range []llm.StreamEvent{{Type: llm.SETextDelta, Text: "done"}, {Type: llm.SEMessageDelta, StopReason: "end_turn"}, {Type: llm.SEMessageStop}} {
+			if !y(ev, nil) {
+				return
+			}
+		}
+	}}
+	var contextRow, result db.Activity
+	_, _, err := captureRun(t.Context(), agentcore.Options{Provider: provider, ContextWindow: 10000, MaxTokens: 100, Tools: []actool.CoreTool{}, DisableBackgroundTasks: true}, "latest fixture", func(a db.Activity) {
+		if a.Kind == "context_usage" {
+			contextRow = a
+		}
+		if a.Kind == "result" {
+			result = a
+		}
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata struct {
+		Context *harness.ContextUsage `json:"context_usage"`
+	}
+	if err := json.Unmarshal(contextRow.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata.Context == nil || metadata.Context.WindowTokens != 10000 || metadata.Context.UsedTokens <= 0 || contextRow.InputTokens != nil || contextRow.Summary != "" {
+		t.Fatal("context confused with message/billing", contextRow)
+	}
+	if string(result.Metadata) != string(contextRow.Metadata) {
+		t.Fatal("final result lost paginated context snapshot")
+	}
 }
 
 func TestCaptureRetryPersistsFullErrorDetail(t *testing.T) {

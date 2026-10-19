@@ -616,6 +616,7 @@ export const FINDING_UNASSIGNED_ASSET = "__none__";
 
 // ---- Activity / sessions ----
 export type ActivityKind =
+  | "context_usage"
   | "retry"
   | "tool_use"
   | "tool_result"
@@ -650,6 +651,7 @@ export interface Activity {
   summary: string;
   detail?: string;
   metadata?: {
+    context_usage?: ContextUsage;
     delivery_mode?: "steer" | "queue";
     inbox_id?: number;
     stream_id?: string;
@@ -666,6 +668,15 @@ export interface Activity {
   output_tokens?: number;
   cache_read_tokens?: number;
   cache_write_tokens?: number;
+}
+
+export interface ContextUsage {
+  used_tokens: number;
+  window_tokens: number;
+  input_budget: number;
+  reserved_tokens: number;
+  trimmed_messages: number;
+  estimated: boolean;
 }
 
 export interface LLMAuditProfile {

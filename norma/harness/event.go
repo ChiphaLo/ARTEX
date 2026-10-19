@@ -12,14 +12,15 @@ import "github.com/Autumn-27/norma/llm"
 type EventKind string
 
 const (
-	KindText       EventKind = "text"        // assistant text delta
-	KindThinking   EventKind = "thinking"    // reasoning delta
-	KindToolUse    EventKind = "tool_use"    // a tool is about to run
-	KindToolResult EventKind = "tool_result" // a tool finished
-	KindProgress   EventKind = "progress"    // mid-tool progress
-	KindUsage      EventKind = "usage"       // cumulative token usage so far (per model turn)
-	KindResult     EventKind = "result"      // terminal event (loop finished)
-	KindRetry      EventKind = "retry"       // transient model failure; run remains active
+	KindText         EventKind = "text"          // assistant text delta
+	KindThinking     EventKind = "thinking"      // reasoning delta
+	KindToolUse      EventKind = "tool_use"      // a tool is about to run
+	KindToolResult   EventKind = "tool_result"   // a tool finished
+	KindProgress     EventKind = "progress"      // mid-tool progress
+	KindUsage        EventKind = "usage"         // cumulative token usage so far (per model turn)
+	KindResult       EventKind = "result"        // terminal event (loop finished)
+	KindRetry        EventKind = "retry"         // transient model failure; run remains active
+	KindContextUsage EventKind = "context_usage" // latest request, not cumulative billing
 )
 
 // Event is one item in the loop's output stream.
@@ -30,6 +31,7 @@ type Event struct {
 	ToolResult *llm.ContentBlock // KindToolResult
 	Terminal   *Terminal         // KindResult
 	Usage      *llm.Usage        // KindUsage: cumulative usage after the latest model turn
+	Context    *ContextUsage
 }
 
 // TerminalReason explains why the loop stopped.

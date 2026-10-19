@@ -14,6 +14,12 @@ vm.runInThisContext(`(function(module,exports){${js}\n})`, { filename: file })(m
 const { coalesceThinking, advanceActivityUnread } = mod.exports;
 const delta = (seq, id, text) => ({ seq, kind: "thinking", metadata: { stream_id: id, stream_delta: text } });
 
+test("context usage updates cursor but is not an unread response", () => {
+  const state = advanceActivityUnread({ unread: 2, unreadSeq: 1 }, { seq: 3, kind: "context_usage" }, false);
+  assert.equal(state.unread, 2);
+  assert.equal(state.unreadSeq, 3);
+});
+
 test("thinking grows across multiline deltas without mutating raw history", () => {
   const rows = [delta(1, "a", "first line\n"), delta(2, "a", "second line")];
   const merged = coalesceThinking(rows);
