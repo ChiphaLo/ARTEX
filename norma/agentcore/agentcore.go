@@ -66,11 +66,12 @@ type Options struct {
 	// Host-authored steering at safe model-turn boundaries. Never cancels a stream/tool.
 	PendingMessages func(context.Context) []llm.Message
 
-	// Compaction, when non-nil, enables automatic context-window management,
-	// summarizing with the same Provider. Ignored when Compactor is set.
+	// Compaction configures legacy summarization with the same Provider.
+	// Ignored when Compactor is set or ContextWindow selects request-aware mode.
 	Compaction *compaction.Config
-	// ContextWindow enables final FIFO request trimming without deleting history.
-	// Positive values replace built-in LLM summarization; 0 keeps legacy behavior.
+	// ContextWindow enables request-aware summarization at 90% of the full budget
+	// and final FIFO trimming only beyond 100%, without deleting raw history.
+	// Custom Compactor still wins; 0 keeps legacy behavior.
 	ContextWindow int
 
 	// Compactor lets the host take over context management entirely. Setting it
@@ -272,7 +273,13 @@ func NewSession(opts Options) *Session {
 				"They are mutually exclusive context managers; set only one.")
 		}
 		s.compactor = opts.Compactor
-	} else if opts.Compaction != nil && opts.ContextWindow <= 0 {
+	} else if opts.ContextWindow > 0 {
+		cfg := compaction.Config{ContextWindow: opts.ContextWindow, RequestThresholdPercent: 90,
+			OnError: func(err error) {
+				s.warn("上下文自动压缩失败，保留原文；超过总预算才裁剪：" + err.Error())
+			}}
+		s.compactor = compaction.New(cfg, compaction.WindowedProviderSummarizer(opts.Provider, opts.ContextWindow, opts.MaxTokens, opts.NonStreaming))
+	} else if opts.Compaction != nil {
 		s.compactor = compaction.New(*opts.Compaction, compaction.ProviderSummarizer(opts.Provider, opts.MaxTokens, opts.NonStreaming))
 	}
 	if opts.Plan != nil {

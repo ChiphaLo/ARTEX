@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"fmt"
 	"regexp"
 	"strings"
 
@@ -58,6 +59,10 @@ func ProviderSummarizer(p llm.Provider, maxOutputTokens int, nonStreaming bool) 
 // retrying transient (non-overflow) stream failures. Overflow is returned
 // immediately so the caller can truncate and retry at a coarser granularity.
 func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.Message, nonStreaming bool) (string, error) {
+	return streamSummaryChecked(ctx, p, maxOut, head, nonStreaming, false)
+}
+
+func streamSummaryChecked(ctx context.Context, p llm.Provider, maxOut int, head []llm.Message, nonStreaming, strict bool) (string, error) {
 	reqMsgs := make([]llm.Message, 0, len(head)+1)
 	reqMsgs = append(reqMsgs, head...)
 	reqMsgs = append(reqMsgs, llm.UserText(compactPrompt))
@@ -74,9 +79,12 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
 		}
 		var text string
 		var callErr error
+		stopReason := ""
+		finished := nonStreaming
 		if nonStreaming {
-			msg, _, _, err := p.Complete(ctx, req)
+			msg, stop, _, err := p.Complete(ctx, req)
 			text, callErr = msg.Text(), err
+			stopReason = stop
 		} else {
 			acc := llm.NewAccumulator()
 			for ev, err := range p.Stream(ctx, req) {
@@ -85,10 +93,17 @@ func streamSummary(ctx context.Context, p llm.Provider, maxOut int, head []llm.M
 					break
 				}
 				acc.Add(ev)
+				if ev.Type == llm.SEMessageStop {
+					finished = true
+				}
 			}
 			if callErr == nil {
 				text = acc.Message().Text()
+				stopReason = acc.StopReason
 			}
+		}
+		if callErr == nil && strict && (!finished || stopReason != "end_turn" || strings.TrimSpace(text) == "") {
+			callErr = fmt.Errorf("incomplete compaction response: finished=%v stop_reason=%q", finished, stopReason)
 		}
 		if callErr == nil {
 			return text, nil

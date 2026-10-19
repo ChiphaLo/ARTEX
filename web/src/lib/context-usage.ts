@@ -28,7 +28,13 @@ export function latestContextUsage(activities: Activity[]): ContextUsage | null 
 }
 
 export function contextPercent(usage: ContextUsage): number {
-  return Math.round((usage.used_tokens / usage.window_tokens) * 100);
+  return Math.round((contextBudgetTokens(usage) / usage.window_tokens) * 100);
+}
+
+// The 90%/100% gates use the entire request budget, including reserved output.
+export function contextBudgetTokens(usage: ContextUsage): number {
+  const reserve = Number.isFinite(usage.reserved_tokens) ? Math.max(0, usage.reserved_tokens) : 0;
+  return usage.used_tokens + reserve;
 }
 
 export function contextTokens(value: number): string {

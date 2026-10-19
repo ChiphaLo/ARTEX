@@ -106,7 +106,7 @@ const (
 )
 
 // CompactionWindow retains its public name for compatibility. It resolves the
-// FIFO context budget in tokens: 0/unset → 200K, otherwise clamped to [32K, 1M].
+// request budget in tokens: 0/unset → 200K, otherwise clamped to [32K, 1M].
 func (c Config) CompactionWindow() int {
 	k := c.ContextWindowK
 	if k <= 0 {

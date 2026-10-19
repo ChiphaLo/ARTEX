@@ -151,6 +151,12 @@ type Compactor interface {
 	IsOverflow(err error) bool
 }
 
+// RequestCompactor gates compression on the fully built request, rather than
+// a stale previous input count that omits new messages and fixed schemas.
+type RequestCompactor interface {
+	PreRequest(ctx context.Context, msgs []llm.Message, inputTokens, reservedTokens int) []llm.Message
+}
+
 // ContextView is optionally implemented by a Compactor that builds the request
 // message array itself, replacing llm.MessagesForAPI. Hosts with their own
 // context manager (e.g. model-driven compression) implement it to project the
@@ -932,6 +938,29 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 		Temperature:     l.in.Temperature,
 	}
 	if l.in.ContextWindow > 0 {
+		if c, ok := l.in.Compactor.(RequestCompactor); ok {
+			before, sizeErr := measureContextRequest(req, l.in.ContextWindow)
+			if sizeErr != nil {
+				err = fmt.Errorf("%w: cannot size request: %v", ErrContextWindow, sizeErr)
+				return
+			}
+			l.messages = c.PreRequest(l.ctx, l.messages, before.UsedTokens, before.ReservedTokens)
+			if l.ctx.Err() != nil {
+				err = l.ctx.Err()
+				return
+			}
+			if l.in.ContextFilter != nil {
+				l.messages, err = l.in.ContextFilter(l.messages)
+				if err != nil {
+					return
+				}
+			}
+			l.recordNewBoundary()
+			req.Messages = l.requestMessages()
+			if l.in.SystemReminder != "" {
+				req.Messages = append([]llm.Message{llm.UserText(l.in.SystemReminder)}, req.Messages...)
+			}
+		}
 		protectedPrefix := 0
 		if l.in.SystemReminder != "" {
 			protectedPrefix = 1

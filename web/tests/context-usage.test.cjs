@@ -21,7 +21,7 @@ function load(relative) {
   vm.runInThisContext(`(function(module,exports,require){${js}\n})`, { filename: file })(mod, mod.exports, req);
   return mod.exports;
 }
-const { latestContextUsage, contextPercent, contextTokens } = load("lib/context-usage");
+const { latestContextUsage, contextPercent, contextTokens, contextBudgetTokens } = load("lib/context-usage");
 const usage = { used_tokens: 283000, window_tokens: 475000, input_budget: 450000, reserved_tokens: 25000, trimmed_messages: 10, estimated: true };
 const event = (seq, u = usage, kind = "context_usage") => ({ seq, kind, metadata: { context_usage: u } });
 
@@ -34,7 +34,9 @@ test("provider switch invalidates old capacity; bad data does not show false zer
   assert.equal(latestContextUsage([event(1), { seq: 2, kind: "llm_switch" }]), null);
   assert.equal(latestContextUsage([event(1, { ...usage, window_tokens: 0 })]), null);
   assert.equal(latestContextUsage([event(1, { ...usage, used_tokens: NaN })]), null);
-  assert.equal(contextPercent(usage), 60);
+  assert.equal(contextPercent(usage), 65);
+  assert.equal(contextBudgetTokens(usage), 308000);
+  assert.equal(contextPercent({ ...usage, used_tokens: 425000 }), 95);
   assert.equal(contextTokens(283000), "283K");
   assert.equal(contextTokens(1048576), "1.05M");
 });
@@ -43,6 +45,6 @@ test("indicator renders only an accessible circle while tooltip is closed", () =
   const html = renderToString(React.createElement(ContextWindowIndicator, { activity: [event(1)] }));
   assert.match(html, /<button/);
   assert.match(html, /aria-label="上下文用量"/);
-  assert.match(html, /stroke-dasharray="60 100"/);
-  assert.doesNotMatch(html, /283K|475K|60%|非累计消耗/);
+  assert.match(html, /stroke-dasharray="65 100"/);
+  assert.doesNotMatch(html, /283K|308K|475K|65%|非累计消耗|自动压缩/);
 });

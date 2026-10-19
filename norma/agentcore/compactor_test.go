@@ -23,9 +23,10 @@ func (stubCompactor) IsOverflow(error) bool { return false }
 func TestCompactorWinsOverCompaction(t *testing.T) {
 	var warns []string
 	s := NewSession(Options{
-		Compactor:  stubCompactor{},
-		Compaction: &compaction.Config{ContextWindow: 200000},
-		OnWarn:     func(m string) { warns = append(warns, m) },
+		Compactor:     stubCompactor{},
+		Compaction:    &compaction.Config{ContextWindow: 200000},
+		ContextWindow: 200000,
+		OnWarn:        func(m string) { warns = append(warns, m) },
 	})
 	if s.compactor == nil {
 		t.Fatal("session has no compactor")

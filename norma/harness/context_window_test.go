@@ -1,12 +1,17 @@
 package harness
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"iter"
 	"strings"
 	"testing"
 
+	"github.com/Autumn-27/norma/compaction"
 	"github.com/Autumn-27/norma/llm"
+	"github.com/Autumn-27/norma/tool"
 )
 
 func TestContextWindowTrimsOldestWithoutChangingHistory(t *testing.T) {
@@ -35,6 +40,93 @@ func TestContextWindowTrimsOldestWithoutChangingHistory(t *testing.T) {
 	after, _ := json.Marshal(req)
 	if string(after) != string(before) {
 		t.Fatal("durable history mutated")
+	}
+}
+
+func TestContextWindowCompressesAt90AndTrimsOnlyPast100(t *testing.T) {
+	for _, total := range []int{89999, 90000, 95000, 100000, 100001} {
+		for _, fail := range []bool{false, true} {
+			for _, syncMode := range []bool{false, true} {
+				t.Run(fmt.Sprintf("budget=%d/fail=%v/sync=%v", total, fail, syncMode), func(t *testing.T) {
+					const window = 100000
+					registry := tool.NewRegistry(tool.NewBash())
+					messages := []llm.Message{llm.UserText("x")}
+					for range 11 {
+						messages = append(messages, llm.UserText(strings.Repeat("old ", 100)))
+					}
+					messages = append(messages, llm.UserText("latest human request"))
+					req := llm.CompletionRequest{System: []string{"fixed instructions"}, MaxTokens: 1000, Tools: registry.Schemas(),
+						Messages: append([]llm.Message{llm.UserText("system reminder")}, messages...)}
+					size, err := llm.EstimateRequestBytes(req)
+					if err != nil {
+						t.Fatal(err)
+					}
+					// Exact byte geometry exercises both boundary values, not approximate fixtures.
+					messages[0] = llm.UserText(strings.Repeat("x", 1+(total-6000)*3-size))
+					req.Messages = append([]llm.Message{llm.UserText("system reminder")}, messages...)
+					measured, err := measureContextRequest(req, window)
+					if err != nil || measured.UsedTokens+measured.ReservedTokens != total {
+						t.Fatal(measured, err)
+					}
+					original, _ := json.Marshal(messages)
+					summaryCalls := 0
+					c := compaction.New(compaction.Config{ContextWindow: window, RequestThresholdPercent: 90}, func(context.Context, []llm.Message) (string, error) {
+						summaryCalls++
+						if fail {
+							return "", errors.New("fixture summary failure")
+						}
+						return "compressed old history", nil
+					})
+					var sent llm.CompletionRequest
+					deps := QueryDeps{
+						CallModel: func(_ context.Context, r llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+							sent = r
+							return func(y func(llm.StreamEvent, error) bool) {
+								for _, ev := range textTurn("done") {
+									if !y(ev, nil) {
+										return
+									}
+								}
+							}
+						},
+						CallModelSync: func(_ context.Context, r llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+							sent = r
+							return llm.UserText("done"), "end_turn", llm.Usage{}, nil
+						},
+					}
+					var usage ContextUsage
+					var terminal *Terminal
+					for ev, err := range Query(t.Context(), QueryInput{System: req.System, SystemReminder: "system reminder", Messages: messages, Tools: registry,
+						MaxTokens: 1000, ContextWindow: window, Compactor: c, NonStreaming: syncMode}, deps) {
+						if err != nil {
+							t.Fatal(err)
+						}
+						if ev.Context != nil {
+							usage = *ev.Context
+						}
+						if ev.Terminal != nil {
+							terminal = ev.Terminal
+						}
+					}
+					if (summaryCalls > 0) != (total >= 90000) {
+						t.Fatal("wrong 90% summary gate", summaryCalls)
+					}
+					if (usage.TrimmedMessages > 0) != (total > 100000 && fail) {
+						t.Fatal("trim before overflow or before summary", usage)
+					}
+					if terminal == nil || terminal.Reason != ReasonCompleted || usage.UsedTokens+usage.ReservedTokens > window {
+						t.Fatal(terminal, usage)
+					}
+					if sent.Messages[0].Text() != "system reminder" || sent.Messages[len(sent.Messages)-1].Text() != "latest human request" {
+						t.Fatal("protected content lost")
+					}
+					after, _ := json.Marshal(messages)
+					if string(after) != string(original) {
+						t.Fatal("original history changed")
+					}
+				})
+			}
+		}
 	}
 }
 

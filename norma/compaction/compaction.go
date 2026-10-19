@@ -22,6 +22,7 @@ package compaction
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"strings"
 
@@ -40,8 +41,15 @@ type Config struct {
 	// is min(MaxOutputTokens, 20000) (default 8000).
 	MaxOutputTokens int
 	// KeepRecent is the number of recent messages AutoCompact always preserves as
-	// the un-summarized tail (default 8). MicroCompact uses its own microKeepRecent.
+	// the un-summarized tail (default 8). Request-aware mode can retain fewer in a
+	// short history, but always protects the latest user input and complete pairs.
+	// MicroCompact uses its own microKeepRecent.
 	KeepRecent int
+	// RequestThresholdPercent enables a request-aware gate (e.g. 90). Pre then
+	// leaves history untouched; PreRequest measures the final input plus reserve.
+	// Zero preserves legacy micro/predictive compaction for SDK callers.
+	RequestThresholdPercent int
+	OnError                 func(error)
 }
 
 func (c *Config) defaults() {
@@ -171,6 +179,9 @@ func blockChars(b llm.ContentBlock) int {
 // non-destructive. lastInputTokens is the previous response's total token size
 // (0 if none yet), used as the initial gate count.
 func (c *Compactor) Pre(ctx context.Context, msgs []llm.Message, lastInputTokens int) []llm.Message {
+	if c.cfg.RequestThresholdPercent > 0 {
+		return msgs
+	}
 	if c.cfg.ContextWindow <= 0 {
 		return msgs
 	}
@@ -190,6 +201,19 @@ func (c *Compactor) Pre(ctx context.Context, msgs []llm.Message, lastInputTokens
 		if out, ok := c.autoCompact(ctx, msgs, tok, "auto"); ok {
 			msgs = out
 		}
+	}
+	return msgs
+}
+
+// PreRequest is called after system instructions, schemas and reminders have
+// been measured. It summarizes at the configured percentage, never micro-trims.
+func (c *Compactor) PreRequest(ctx context.Context, msgs []llm.Message, inputTokens, reservedTokens int) []llm.Message {
+	if c.cfg.RequestThresholdPercent <= 0 || c.cfg.ContextWindow <= 0 ||
+		inputTokens+reservedTokens < c.cfg.ContextWindow*c.cfg.RequestThresholdPercent/100 {
+		return msgs
+	}
+	if out, ok := c.autoCompact(ctx, msgs, inputTokens, "auto"); ok {
+		return out
 	}
 	return msgs
 }
@@ -227,6 +251,36 @@ func IsOverflow(err error) bool {
 func (c *Compactor) workingBounds(msgs []llm.Message) (start, tailStart int) {
 	start = llm.LastBoundaryIndex(msgs) + 1
 	tailStart = max(lastNNonMarkerStart(msgs, c.cfg.KeepRecent), start)
+	if c.cfg.RequestThresholdPercent > 0 {
+		// Keep the latest textual user request verbatim, even after a long tool
+		// chain. Move the cut back if it would split a parallel tool exchange.
+		for i := len(msgs) - 1; i >= start; i-- {
+			if msgs[i].Role == llm.RoleUser && msgs[i].Text() != "" {
+				if tailStart == start && i > start {
+					// A short history can contain very large old attachments. Do
+					// not skip all compression just because it has <KeepRecent rows.
+					tailStart = i
+				} else {
+					tailStart = min(tailStart, i)
+				}
+				break
+			}
+		}
+		open := map[string]int{}
+		for i := start; i < tailStart; i++ {
+			for _, b := range msgs[i].Content {
+				if b.Type == llm.BlockToolUse {
+					open[b.ID] = i
+				}
+				if b.Type == llm.BlockToolResult {
+					delete(open, b.ToolUseID)
+				}
+			}
+		}
+		for _, i := range open {
+			tailStart = min(tailStart, i)
+		}
+	}
 	return
 }
 
@@ -305,7 +359,15 @@ func (c *Compactor) autoCompact(ctx context.Context, msgs []llm.Message, preTok 
 		return msgs, false
 	}
 	summary, err := c.summarize(ctx, toSummarize)
+	if err == nil && c.cfg.RequestThresholdPercent > 0 {
+		if strings.TrimSpace(summary) == "" || EstimateTokens([]llm.Message{llm.UserText(compactContinuationPreamble + summary)}) >= EstimateTokens(toSummarize) {
+			err = fmt.Errorf("context summary was empty or did not reduce the summarized history")
+		}
+	}
 	if err != nil {
+		if c.cfg.OnError != nil {
+			c.cfg.OnError(err)
+		}
 		c.failures++
 		if c.failures >= maxAutoCompactFails {
 			c.tripped = true

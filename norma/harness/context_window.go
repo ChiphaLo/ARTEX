@@ -9,7 +9,7 @@ import (
 )
 
 // An estimate, not a model tokenizer. Include serialized UTF-8 bytes and framing.
-const contextBytesPerToken = 3
+const contextBytesPerToken = llm.RequestBytesPerToken
 
 var ErrContextWindow = errors.New("prompt is too long for the configured context window")
 
@@ -27,9 +27,7 @@ type contextGroup struct {
 	pinned            bool
 }
 
-// Project only: retain fixed instructions/tools, the reminder, newest user input
-// and latest exchange. Never cut tool arguments or retain only half an exchange.
-func trimContextRequest(req llm.CompletionRequest, window, protectedPrefix int) (llm.CompletionRequest, ContextUsage, error) {
+func measureContextRequest(req llm.CompletionRequest, window int) (ContextUsage, error) {
 	usage := ContextUsage{WindowTokens: window, Estimated: true}
 	output := req.MaxTokens
 	if output <= 0 {
@@ -37,6 +35,18 @@ func trimContextRequest(req llm.CompletionRequest, window, protectedPrefix int) 
 	}
 	usage.ReservedTokens = output + max(1, window/20)
 	usage.InputBudget = window - usage.ReservedTokens
+	total, err := llm.EstimateRequestBytes(req)
+	usage.UsedTokens = (total + contextBytesPerToken - 1) / contextBytesPerToken
+	return usage, err
+}
+
+// Project only: retain fixed instructions/tools, the reminder, newest user input
+// and latest exchange. Never cut tool arguments or retain only half an exchange.
+func trimContextRequest(req llm.CompletionRequest, window, protectedPrefix int) (llm.CompletionRequest, ContextUsage, error) {
+	usage, err := measureContextRequest(req, window)
+	if err != nil {
+		return req, usage, fmt.Errorf("%w: cannot size request: %v", ErrContextWindow, err)
+	}
 	msgs := llm.PairToolBlocks(req.Messages)
 	latestUser := -1
 	for i, msg := range msgs {
@@ -52,7 +62,7 @@ func trimContextRequest(req llm.CompletionRequest, window, protectedPrefix int) 
 		if err != nil {
 			return req, usage, fmt.Errorf("%w: cannot size message: %v", ErrContextWindow, err)
 		}
-		size += len(raw) + 13 // separator plus role/framing allowance
+		size += len(raw) + llm.MessageFramingBytes
 		for _, b := range msg.Content {
 			if b.Type == llm.BlockToolUse {
 				open[b.ID] = true

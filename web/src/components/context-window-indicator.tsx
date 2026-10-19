@@ -1,14 +1,16 @@
 "use client";
 
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
-import { contextPercent, contextTokens, latestContextUsage } from "@/lib/context-usage";
+import { contextBudgetTokens, contextPercent, contextTokens, latestContextUsage } from "@/lib/context-usage";
 import type { Activity } from "@/lib/types";
 
 export function ContextWindowIndicator({ activity }: { activity: Activity[] }) {
   const usage = latestContextUsage(activity);
   const percent = usage ? contextPercent(usage) : null;
   const fill = Math.min(100, Math.max(0, percent ?? 0));
-  const tone = fill >= 95 ? "text-red-500" : fill >= 80 ? "text-amber-500" : "text-muted-foreground";
+  let tone = "text-muted-foreground";
+  if (fill >= 95) tone = "text-red-500";
+  else if (fill >= 90) tone = "text-amber-500";
   return (
     <TooltipProvider delayDuration={200}>
       <Tooltip>
@@ -39,12 +41,14 @@ export function ContextWindowIndicator({ activity }: { activity: Activity[] }) {
           <span className="opacity-70">上下文窗口{usage?.estimated ? "（估算）" : ""}</span>
           {usage ? (
             <>
-              <span>{percent}% 已使用</span>
+              <span>{percent}% 请求预算占用</span>
               <span>
-                {contextTokens(usage.used_tokens)} / {contextTokens(usage.window_tokens)} tokens
+                {contextTokens(contextBudgetTokens(usage))} / {contextTokens(usage.window_tokens)} tokens
               </span>
               <span className="text-xs opacity-70">最近一次请求 · 非累计消耗</span>
+              <span className="text-xs opacity-70">输入估算 {contextTokens(usage.used_tokens)} tokens</span>
               <span className="text-xs opacity-70">输出与安全余量 {contextTokens(usage.reserved_tokens)} tokens</span>
+              <span className="text-xs opacity-70">90% 自动压缩 · 100% 裁剪兜底</span>
               {usage.trimmed_messages > 0 && (
                 <span className="text-xs opacity-70">本次已裁剪最旧的 {usage.trimmed_messages} 条上下文</span>
               )}
