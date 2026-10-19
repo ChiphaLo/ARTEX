@@ -502,7 +502,7 @@ func (l *loop) run() {
 			}
 			if consecutiveFailures < retryPolicy.Retries && retryPolicy.Retryable != nil && retryPolicy.Retryable(streamErr) {
 				consecutiveFailures++
-				if !l.emit(Event{Kind: KindRetry, Text: fmt.Sprintf("模型连接暂时失败，等待 %s 后重试（%d/%d）", retryPolicy.Delay, consecutiveFailures, retryPolicy.Retries)}) {
+				if !l.emit(Event{Kind: KindRetry, Text: fmt.Sprintf("模型调用失败，等待 %s 后重试（%d/%d）\n上游错误：\n%s", retryPolicy.Delay, consecutiveFailures, retryPolicy.Retries, streamErr.Error())}) {
 					return
 				}
 				timer := time.NewTimer(retryPolicy.Delay)

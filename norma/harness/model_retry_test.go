@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -14,6 +15,55 @@ import (
 	"github.com/Autumn-27/norma/permission"
 	"github.com/Autumn-27/norma/tool"
 )
+
+func TestManagedRetryIncludesFullUpstreamError(t *testing.T) {
+	for _, syncMode := range []bool{false, true} {
+		t.Run(fmt.Sprint(syncMode), func(t *testing.T) {
+			upstream := "openai-responses: status 503: {\n  \"code\":\"upstream_unavailable\",\n  \"detail\":\"" + strings.Repeat("diagnostic ", 700) + "\",\n  \"requestId\":\"fixture-request-id\"\n}"
+			calls, retries := 0, 0
+			fail := func() bool { calls++; return calls == 1 }
+			deps := QueryDeps{
+				CallModel: func(context.Context, llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
+					return func(y func(llm.StreamEvent, error) bool) {
+						if fail() {
+							y(llm.StreamEvent{}, errors.New(upstream))
+							return
+						}
+						for _, e := range textTurn("recovered") {
+							if !y(e, nil) {
+								return
+							}
+						}
+					}
+				},
+				CallModelSync: func(context.Context, llm.CompletionRequest) (llm.Message, string, llm.Usage, error) {
+					if fail() {
+						return llm.Message{}, "", llm.Usage{}, errors.New(upstream)
+					}
+					return llm.Message{Role: llm.RoleAssistant, Content: []llm.ContentBlock{llm.TextBlock("recovered")}}, "end_turn", llm.Usage{}, nil
+				},
+			}
+			ctx := WithModelRetry(t.Context(), ModelRetryPolicy{Retries: 5, Retryable: func(error) bool { return true }})
+			for e, err := range Query(ctx, QueryInput{NonStreaming: syncMode}, deps) {
+				if err != nil {
+					t.Fatal(err)
+				}
+				if e.Kind == KindRetry {
+					retries++
+					if !strings.HasSuffix(e.Text, upstream) || !strings.Contains(e.Text, "（1/5）") {
+						t.Fatal("lost raw upstream error", e.Text)
+					}
+				}
+				if e.Terminal != nil && e.Terminal.Reason != ReasonCompleted {
+					t.Fatal(e.Terminal)
+				}
+			}
+			if calls != 2 || retries != 1 {
+				t.Fatal(calls, retries)
+			}
+		})
+	}
+}
 
 func TestManagedRetryLimitAndCancel(t *testing.T) {
 	for _, cancelWait := range []bool{false, true} {

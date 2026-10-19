@@ -199,14 +199,14 @@ func parseAnthropicResponse(raw []byte) (Message, string, Usage, error) {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return Message{}, "", Usage{}, fmt.Errorf("anthropic: decode response: %w (body: %s)", err, truncate(string(raw), 500))
+		return Message{}, "", Usage{}, fmt.Errorf("anthropic: decode response: %w (body: %s)", err, string(raw))
 	}
 	if r.Error != nil || r.Type == "error" {
 		msg := "error response"
 		if r.Error != nil {
 			msg = r.Error.Message
 		}
-		return Message{}, "", Usage{}, fmt.Errorf("anthropic: %s", msg)
+		return Message{}, "", Usage{}, fmt.Errorf("anthropic: %s\nupstream response:\n%s", msg, raw)
 	}
 	var usage Usage
 	if r.Usage != nil {
@@ -308,7 +308,7 @@ func parseAnthropicFrame(data string) (StreamEvent, bool, error) {
 		if f.Error != nil {
 			msg = f.Error.Message
 		}
-		return StreamEvent{}, false, fmt.Errorf("anthropic: %s", msg)
+		return StreamEvent{}, false, fmt.Errorf("anthropic: %s\nupstream event:\n%s", msg, data)
 	}
 	return StreamEvent{}, false, nil
 }

@@ -315,7 +315,7 @@ func (p *openaiProvider) Stream(ctx context.Context, req CompletionRequest) iter
 			consumerStopped := false
 			var streamErr error
 			for {
-				_, data, serr := scan.next()
+				event, data, serr := scan.next()
 				if serr == io.EOF {
 					break
 				}
@@ -329,6 +329,10 @@ func (p *openaiProvider) Stream(ctx context.Context, req CompletionRequest) iter
 				}
 				if data == "[DONE]" {
 					doneSeen = true
+					break
+				}
+				if err := openAIStreamError(event, data); err != nil {
+					streamErr = err
 					break
 				}
 				evs, sr, u, ok := parseOpenAIFrame(data, started)
@@ -449,10 +453,10 @@ func parseOpenAIResponse(raw []byte) (Message, string, Usage, error) {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return Message{}, "", Usage{}, fmt.Errorf("openai: decode response: %w (body: %s)", err, truncate(string(raw), 500))
+		return Message{}, "", Usage{}, fmt.Errorf("openai: decode response: %w (body: %s)", err, string(raw))
 	}
 	if r.Error != nil {
-		return Message{}, "", Usage{}, fmt.Errorf("openai: %s", r.Error.Message)
+		return Message{}, "", Usage{}, fmt.Errorf("openai: %s\nupstream response:\n%s", r.Error.Message, raw)
 	}
 	var usage Usage
 	if r.Usage != nil {
@@ -463,7 +467,7 @@ func parseOpenAIResponse(raw []byte) (Message, string, Usage, error) {
 		}
 	}
 	if len(r.Choices) == 0 {
-		return Message{}, "", usage, fmt.Errorf("openai: empty response (no choices; body: %s)", truncate(string(raw), 500))
+		return Message{}, "", usage, fmt.Errorf("openai: empty response (no choices; body: %s)", raw)
 	}
 	ch := r.Choices[0]
 	var blocks []ContentBlock

@@ -133,7 +133,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 		switch ev.Kind {
 		case harness.KindRetry:
 			flush()
-			rec(db.Activity{Kind: "retry", Summary: ev.Text})
+			rec(db.Activity{Kind: "retry", Summary: ev.Text, Detail: ev.Text})
 		case harness.KindToolUse:
 			if ev.ToolUse == nil {
 				continue

@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"time"
 )
 
@@ -53,7 +52,7 @@ func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeade
 			}
 			data, _ := io.ReadAll(resp.Body)
 			resp.Body.Close()
-			return nil, fmt.Errorf("%s: status %d: %s", errPrefix, resp.StatusCode, strings.TrimSpace(string(data)))
+			return nil, fmt.Errorf("%s: status %d: %s", errPrefix, resp.StatusCode, string(data))
 		}
 		if resp != nil {
 			resp.Body.Close()

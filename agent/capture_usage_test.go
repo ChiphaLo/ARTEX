@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"iter"
+	"strings"
 	"testing"
 	"time"
 
@@ -16,6 +17,57 @@ import (
 
 type captureUsageProvider struct {
 	stream func(context.Context, func(llm.StreamEvent, error) bool)
+}
+
+func TestCaptureRetryPersistsFullErrorDetail(t *testing.T) {
+	want := "openai-responses: status 502: {\n\"message\":\"" + strings.Repeat("upstream diagnostic ", 400) + "\",\n\"requestId\":\"fixture-request\"}"
+	calls := 0
+	provider := captureUsageProvider{stream: func(_ context.Context, y func(llm.StreamEvent, error) bool) {
+		calls++
+		if calls == 1 {
+			y(llm.StreamEvent{}, errors.New(want))
+			return
+		}
+		for _, ev := range []llm.StreamEvent{{Type: llm.SETextDelta, Text: "recovered"}, {Type: llm.SEMessageDelta, StopReason: "end_turn"}, {Type: llm.SEMessageStop}} {
+			if !y(ev, nil) {
+				return
+			}
+		}
+	}}
+	retries := 0
+	ctx := harness.WithModelRetry(t.Context(), harness.ModelRetryPolicy{Retries: 5, Retryable: func(error) bool { return true }})
+	_, reason, err := captureRun(ctx, agentcore.Options{Provider: provider}, "fixture", func(a db.Activity) {
+		if a.Kind == "retry" {
+			retries++
+			if a.Detail != a.Summary || !strings.HasSuffix(a.Detail, want) || a.IsError {
+				t.Fatalf("retry detail lost or marked terminal: %+v", a)
+			}
+		}
+	})
+	if err != nil || reason != harness.ReasonCompleted || retries != 1 {
+		t.Fatal(reason, retries, err)
+	}
+}
+
+func TestCapturePromptTooLongKeepsUpstreamErrorWithoutTransientRetry(t *testing.T) {
+	want := `openai-responses: status 400: {"error":{"code":400,"message":"upstream 400: {\"code\":11115,\"msg\":\"prompt is too long: 5808571 tokens > 1048576 maximum\",\"requestId\":\"fixture-request\"}"}}`
+	calls, retries := 0, 0
+	provider := captureUsageProvider{stream: func(_ context.Context, y func(llm.StreamEvent, error) bool) {
+		calls++
+		y(llm.StreamEvent{}, errors.New(want))
+	}}
+	var result db.Activity
+	_, reason, err := captureRun(t.Context(), agentcore.Options{Provider: provider}, "fixture", func(a db.Activity) {
+		if a.Kind == "retry" {
+			retries++
+		}
+		if a.Kind == "result" {
+			result = a
+		}
+	})
+	if calls != 1 || retries != 0 || err == nil || reason != harness.ReasonModelError || !result.IsError || !strings.Contains(result.Detail, want) {
+		t.Fatalf("context overflow misclassified: calls=%d retries=%d reason=%s err=%v detail=%s", calls, retries, reason, err, result.Detail)
+	}
 }
 
 func TestCaptureThinkingStreamsBeforeTerminal(t *testing.T) {

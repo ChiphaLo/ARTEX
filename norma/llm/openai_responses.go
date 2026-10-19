@@ -266,7 +266,7 @@ func parseResponsesFrame(event, data string) (StreamEvent, bool, error) {
 		if f.Error != nil {
 			msg = f.Error.Message
 		}
-		return StreamEvent{}, false, fmt.Errorf("openai-responses: %s", msg)
+		return StreamEvent{}, false, fmt.Errorf("openai-responses: %s\nupstream event:\n%s", msg, data)
 	}
 	return StreamEvent{}, false, nil
 }
@@ -342,10 +342,10 @@ func parseResponsesResponse(raw []byte) (Message, string, Usage, error) {
 		} `json:"error"`
 	}
 	if err := json.Unmarshal(raw, &r); err != nil {
-		return Message{}, "", Usage{}, fmt.Errorf("openai-responses: decode response: %w (body: %s)", err, truncate(string(raw), 500))
+		return Message{}, "", Usage{}, fmt.Errorf("openai-responses: decode response: %w (body: %s)", err, string(raw))
 	}
 	if r.Error != nil {
-		return Message{}, "", Usage{}, fmt.Errorf("openai-responses: %s", r.Error.Message)
+		return Message{}, "", Usage{}, fmt.Errorf("openai-responses: %s\nupstream response:\n%s", r.Error.Message, raw)
 	}
 	var usage Usage
 	if r.Usage != nil {
