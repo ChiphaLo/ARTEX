@@ -8,6 +8,7 @@ import { toast } from "sonner";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { Button } from "@/components/ui/button";
 import { type AgentInboxItem, api } from "@/lib/api";
+import { newRequestID } from "@/lib/request-id";
 import type { ChatAttachment } from "@/lib/types";
 
 // The same payload keeps its ID after an unknown HTTP outcome. Editing the
@@ -17,7 +18,7 @@ export function useInboxRequestID() {
   return {
     getID: (payload: unknown) => {
       const key = JSON.stringify(payload);
-      if (last.current.payload !== key) last.current = { payload: key, id: crypto.randomUUID() };
+      if (!last.current.id || last.current.payload !== key) last.current = { payload: key, id: newRequestID() };
       return last.current.id;
     },
     clear: () => {
