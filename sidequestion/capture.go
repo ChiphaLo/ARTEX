@@ -38,6 +38,7 @@ type Model struct {
 	Name         string `json:"name"`
 	Format       string `json:"format"`
 	Model        string `json:"model"`
+	Pinned       bool   `json:"model_pinned,omitempty"` // task-local selection, even when equal to the Provider default
 	Identity     string `json:"identity"`
 	Streaming    bool   `json:"streaming"`
 	WindowTokens int    `json:"window_tokens"`
@@ -146,6 +147,19 @@ type boundProvider struct {
 
 // Bind belongs immediately around a concrete provider, inside any routing pool.
 func Bind(inner llm.Provider, model Model) llm.Provider { return &boundProvider{inner, model} }
+
+// RebindModel replaces the concrete model binding without stacking captures or
+// creating another rate limiter. The caller supplies the new config identity.
+func RebindModel(provider llm.Provider, model Model) (llm.Provider, error) {
+	if p, ok := provider.(*boundProvider); ok {
+		provider = p.inner
+	}
+	inner, err := llm.ForModel(provider, model.Model)
+	if err != nil {
+		return nil, err
+	}
+	return Bind(inner, model), nil
+}
 
 func (p *boundProvider) Stream(ctx context.Context, req llm.CompletionRequest) iter.Seq2[llm.StreamEvent, error] {
 	return func(yield func(llm.StreamEvent, error) bool) {

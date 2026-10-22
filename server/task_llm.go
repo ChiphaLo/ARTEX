@@ -132,7 +132,7 @@ func (r *taskLLMRuntime) current() (taskLLMSelection, error) {
 			return sel, &taskLLMError{taskID: r.taskID, chainExhausted: true, cause: errors.New("all selected profiles are quota exhausted")}
 		}
 		sel.profileID = *pt.ActiveLLMProfileID
-		prov, cfg, ok := r.s.providerForProfile(sel.profileID)
+		prov, cfg, ok := r.s.providerForProfileModel(sel.profileID, pt.LLMModels[sel.profileID])
 		if !ok {
 			return sel, fmt.Errorf("LLM profile #%d is missing or invalid", sel.profileID)
 		}
@@ -165,7 +165,7 @@ func (r *taskLLMRuntime) activeCfg() (agent.Config, bool) {
 		return cfg, true
 	}
 	if len(pt.LLMProfileIDs) > 0 && pt.ActiveLLMProfileID != nil {
-		if _, cfg, ok := r.s.providerForProfile(*pt.ActiveLLMProfileID); ok {
+		if _, cfg, ok := r.s.providerForProfileModel(*pt.ActiveLLMProfileID, pt.LLMModels[*pt.ActiveLLMProfileID]); ok {
 			return cfg, true
 		}
 	}
@@ -534,7 +534,7 @@ func (s *Server) taskRuntimeAvailable(t *Task, agentKeys ...string) bool {
 	unboundReady := false
 	if len(state.ProfileIDs) > 0 {
 		if state.ActiveID != nil {
-			_, _, unboundReady = s.providerForProfile(*state.ActiveID)
+			_, _, unboundReady = s.providerForProfileModel(*state.ActiveID, selectedTaskModel(state))
 		}
 	} else {
 		_, _, unboundReady = s.globalProvider()
@@ -617,7 +617,7 @@ func (s *Server) syncTaskLLMState(pt *db.Task) {
 	id := fmt.Sprintf("%d", pt.ID)
 	s.m.mu.Lock()
 	if task := s.m.tasks[id]; task != nil {
-		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
+		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason, pt.LLMModels)
 	}
 	s.m.mu.Unlock()
 }
@@ -626,10 +626,11 @@ func (s *Server) emitTaskLLMTransition(t *Task, transition db.TaskLLMTransition,
 	if t == nil {
 		return
 	}
-	previous := s.llmAuditProfile(transition.PreviousProfileID)
+	models := t.llmStateSnapshot().Models
+	previous := s.taskLLMAuditProfile(transition.PreviousProfileID, models)
 	var next *llmAuditProfile
 	if transition.NextProfileID != nil {
-		next = s.llmAuditProfile(*transition.NextProfileID)
+		next = s.taskLLMAuditProfile(*transition.NextProfileID, models)
 	}
 	mode := "automatic"
 	kind := "llm_switch"
@@ -687,14 +688,21 @@ func sameOptionalID(a, b *int64) bool {
 	return *a == *b
 }
 
-func (s *Server) emitManualTaskLLMSwitch(t *Task, previousID, nextID *int64) db.Activity {
+func (s *Server) emitManualTaskLLMSwitch(t *Task, previousID, nextID *int64, models ...map[int64]string) db.Activity {
+	var before, after map[int64]string
+	if len(models) > 0 {
+		before = models[0]
+	}
+	if len(models) > 1 {
+		after = models[1]
+	}
 	previous := (*llmAuditProfile)(nil)
 	next := (*llmAuditProfile)(nil)
 	if previousID != nil {
-		previous = s.llmAuditProfile(*previousID)
+		previous = s.taskLLMAuditProfile(*previousID, before)
 	}
 	if nextID != nil {
-		next = s.llmAuditProfile(*nextID)
+		next = s.taskLLMAuditProfile(*nextID, after)
 	}
 	summary := fmt.Sprintf("用户手动将任务 LLM 从 %s 切换到 %s", llmAuditProfileLabel(previous), llmAuditProfileLabel(next))
 	metadata, _ := json.Marshal(llmActivityMetadata{LLMTransition: llmTransitionAudit{

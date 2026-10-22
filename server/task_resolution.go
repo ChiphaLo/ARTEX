@@ -18,6 +18,10 @@ type taskLLMResolution struct {
 }
 
 func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMResolution {
+	return s.resolutionFromProfileModel(p, source, "")
+}
+
+func (s *Server) resolutionFromProfileModel(p *db.LLMProfile, source, model string) taskLLMResolution {
 	if p == nil {
 		return taskLLMResolution{Source: source, Reason: "LLM 配置不存在"}
 	}
@@ -29,11 +33,18 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 		Model:     p.Model,
 		Source:    source,
 	}
+	if model != "" {
+		result.Model = model
+		if !profileHasModel(p, model) {
+			result.Reason = "所选模型已不在 Provider 的模型列表中，请重新选择"
+			return result
+		}
+	}
 	if p.APIKey == "" {
 		result.Reason = "LLM 配置未设置 API Key"
 		return result
 	}
-	if _, _, ok := s.providerForProfile(p.ID); !ok {
+	if _, _, ok := s.providerForProfileModel(p.ID, model); !ok {
 		result.Reason = "LLM 配置格式或参数无效"
 		return result
 	}
@@ -41,7 +52,7 @@ func (s *Server) resolutionFromProfile(p *db.LLMProfile, source string) taskLLMR
 	return result
 }
 
-// resolveTaskRoleLLM mirrors taskLLMRuntime.current without creating a provider:
+// resolveTaskRoleLLM mirrors taskLLMRuntime.current:
 // role Agent binding -> explicit task chain -> active/global environment config.
 // Database failures are returned rather than represented as an unavailable model.
 func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution, error) {
@@ -73,7 +84,7 @@ func (s *Server) resolveTaskRoleLLM(t *Task, agentKey string) (taskLLMResolution
 		if err != nil {
 			return taskLLMResolution{}, fmt.Errorf("load task LLM profile: %w", err)
 		}
-		return s.resolutionFromProfile(p, "task_chain"), nil
+		return s.resolutionFromProfileModel(p, "task_chain", state.Models[*state.ActiveID]), nil
 	}
 	p, err := s.m.pg.ActiveProfile()
 	if err != nil {

@@ -73,6 +73,7 @@ function taskProfileIDs(task: Task): string[] {
 function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: LLMProfile[]; onUpdated: () => void }) {
   const [open, setOpen] = React.useState(false);
   const [profileIDs, setProfileIDs] = React.useState<string[]>(() => taskProfileIDs(task));
+  const [models, setModels] = React.useState<Record<string, string>>(() => ({ ...task.llm_models }));
   const [activeProfileID, setActiveProfileID] = React.useState(
     task.active_llm_profile_id ? String(task.active_llm_profile_id) : (taskProfileIDs(task)[0] ?? ""),
   );
@@ -96,7 +97,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
     : (activeProfile?.name ?? (activeID ? `配置 #${activeID}` : "跟随默认配置"));
   const activeIndex = chain.indexOf(activeID);
   const backupCount = activeIndex >= 0 ? Math.max(0, chain.length - activeIndex - 1) : 0;
-  const currentTitle = [currentLabel, activeProfile?.model, backupCount > 0 ? `${backupCount} 个备用` : ""]
+  const currentTitle = [currentLabel, task.llm_models?.[activeID] ?? activeProfile?.model, backupCount > 0 ? `${backupCount} 个备用` : ""]
     .filter(Boolean)
     .join(" · ");
   let editorDescription = "调整顺序或当前配置后，将从下一次 LLM 调用开始生效。";
@@ -108,6 +109,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
   const syncDraft = React.useCallback(() => {
     const next = taskProfileIDs(task);
     setProfileIDs(next);
+    setModels({ ...task.llm_models });
     setActiveProfileID(task.active_llm_profile_id ? String(task.active_llm_profile_id) : (next[0] ?? ""));
   }, [task]);
 
@@ -128,6 +130,7 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
         task.id,
         profileIDs.map(Number),
         activeProfileID ? Number(activeProfileID) : undefined,
+        models,
       );
       if (result.switch_event) {
         toast.info(result.switch_event.summary, { id: `task-${task.id}-llm-${result.switch_event.seq}` });
@@ -181,6 +184,8 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
           profiles={profiles}
           value={profileIDs}
           onValueChange={handleProfileIDsChange}
+          models={models}
+          onModelsChange={setModels}
           activeProfileId={activeProfileID}
           onActiveProfileChange={setActiveProfileID}
           inputId="task-llm-profiles"

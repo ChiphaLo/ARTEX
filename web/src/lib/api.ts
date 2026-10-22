@@ -277,6 +277,7 @@ export const api = {
     description: string;
     goal: string;
     llmProfileIds?: number[];
+    llmModels?: Record<string, string>;
     sourceTaskIds?: string[];
     companyIds?: number[];
     timeoutSeconds?: number;
@@ -291,6 +292,7 @@ export const api = {
       description: input.description,
       goal: input.goal,
       llm_profile_ids: input.llmProfileIds ?? [],
+      llm_models: input.llmModels ?? {},
       source_task_ids: input.sourceTaskIds ?? [],
       company_ids: input.companyIds ?? [],
       timeout_seconds: input.timeoutSeconds ?? 0,
@@ -323,16 +325,18 @@ export const api = {
     input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
-  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number) =>
+  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number, llmModels?: Record<string, string>) =>
     put<{
       id: string;
       llm_profile_ids: number[];
+      llm_models?: Record<string, string>;
       active_llm_profile_id?: number;
       llm_failover_state: string;
       reopened_intents: number;
       switch_event?: Activity;
     }>(`/tasks/${id}/llm`, {
       llm_profile_ids: llmProfileIds,
+      llm_models: llmModels,
       active_llm_profile_id: activeLLMProfileId ?? null,
     }),
   deleteTask: (id: string, options: DeleteTaskOptions) => del<DeleteTaskResult>(`/tasks/${id}`, options),

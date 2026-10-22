@@ -198,10 +198,26 @@ func (s *Server) sideProvider(model sidequestion.Model) (llm.Provider, error) {
 	if model.ProfileID > 0 {
 		// Validate the persisted reference even if a previous provider is cached.
 		current, exists := s.loadProfileConfig(model.ProfileID)
+		if model.Pinned {
+			profile, err := s.m.pg.ProfileByID(model.ProfileID)
+			if err != nil {
+				return nil, err
+			}
+			if !profileHasModel(profile, model.Model) {
+				return nil, errors.New("模型配置已删除或变化，请先运行主 Agent 更新上下文")
+			}
+			// A task-local pin survives changing only the Provider's default.
+			// Legacy/inherited snapshots retain the original identity check.
+			current.Model = model.Model
+		}
 		if !exists || sideModel(current, model.ProfileID, model.Name).Identity != model.Identity {
 			return nil, errors.New("模型配置已删除或变化，请先运行主 Agent 更新上下文")
 		}
-		p, cfg, ok = s.providerForProfile(model.ProfileID)
+		if model.Pinned {
+			p, cfg, ok = s.providerForProfileModel(model.ProfileID, model.Model)
+		} else {
+			p, cfg, ok = s.providerForProfile(model.ProfileID)
+		}
 	} else {
 		s.cfgMu.Lock()
 		p, cfg, ok = s.llmDirect, s.llmCfg, s.llmOn

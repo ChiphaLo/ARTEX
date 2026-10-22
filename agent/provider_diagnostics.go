@@ -60,6 +60,14 @@ type diagnosticProvider struct {
 	secrets *strings.Replacer
 }
 
+func (p *diagnosticProvider) ForModel(model string) (llm.Provider, error) {
+	provider, err := llm.ForModel(p.Provider, model)
+	if err != nil {
+		return nil, err
+	}
+	return &diagnosticProvider{Provider: provider, secrets: p.secrets}, nil
+}
+
 type diagnosticError struct {
 	cause error
 	text  string

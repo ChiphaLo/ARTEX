@@ -74,6 +74,16 @@ type Recorder struct {
 	enabled         func() bool // reports whether recording is currently on; nil = always record
 }
 
+func (r *Recorder) ForModel(model string) (llm.Provider, error) {
+	provider, err := llm.ForModel(r.inner, model)
+	if err != nil {
+		return nil, err
+	}
+	copy := *r
+	copy.inner, copy.model = provider, model
+	return &copy, nil
+}
+
 // Wrap returns a Provider that records calls to pg when enabled() reports true.
 // profName is the LLM profile name (e.g. "default"); may be empty. thinkingType /
 // reasoningEffort are the config-level thinking params actually sent to the API

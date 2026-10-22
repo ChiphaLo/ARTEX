@@ -24,6 +24,8 @@ interface TaskLLMProfileChainProps {
   profiles: LLMProfile[];
   value: string[];
   onValueChange: (value: string[]) => void;
+  models?: Record<string, string>;
+  onModelsChange?: (models: Record<string, string>) => void;
   activeProfileId?: string;
   onActiveProfileChange?: (value: string) => void;
   disabled?: boolean;
@@ -47,6 +49,8 @@ export function TaskLLMProfileChain({
   profiles,
   value,
   onValueChange,
+  models = {},
+  onModelsChange,
   activeProfileId,
   onActiveProfileChange,
   disabled = false,
@@ -79,12 +83,12 @@ export function TaskLLMProfileChain({
 
   const remove = (id: string) => {
     const next = value.filter((profileID) => profileID !== id);
-    onValueChange(next);
-    if (activeProfileId === id) onActiveProfileChange?.(next[0] ?? "");
+    handleValueChange(next);
   };
 
   const handleValueChange = (next: string[]) => {
     onValueChange(next);
+    onModelsChange?.(Object.fromEntries(Object.entries(models).filter(([id]) => next.includes(id))));
     if (activeProfileId && !next.includes(activeProfileId)) {
       onActiveProfileChange?.(next[0] ?? "");
     }
@@ -141,6 +145,9 @@ export function TaskLLMProfileChain({
         <div className="flex flex-col divide-y rounded-lg border">
           {value.map((id, index) => {
             const profile = profilesByID.get(id);
+            const availableModels = [...new Set([profile?.model, ...(profile?.models ?? [])].filter((m): m is string => !!m))];
+            const pin = models[id];
+            const missingModel = pin && !availableModels.includes(pin);
             return (
               <div
                 key={id}
@@ -149,9 +156,29 @@ export function TaskLLMProfileChain({
                 <span className="w-5 shrink-0 text-center text-muted-foreground text-xs tabular-nums">{index + 1}</span>
                 <div className="min-w-0 sm:flex-1">
                   <p className="truncate font-medium text-sm">{profile?.name ?? `配置 #${id}`}</p>
-                  <div className="flex min-w-0 items-center gap-2">
-                    <p className="truncate text-muted-foreground text-xs">{profile?.model ?? "配置已不可用"}</p>
-                  </div>
+                  {onModelsChange && profile ? (
+                    <Select
+                      value={pin ? `model:${pin}` : "default"}
+                      disabled={disabled}
+                      onValueChange={(value) => {
+                        const next = { ...models };
+                        if (value === "default") delete next[id];
+                        else next[id] = value.slice("model:".length);
+                        onModelsChange(next);
+                      }}
+                    >
+                      <SelectTrigger size="sm" className="mt-1 w-full min-w-0 max-w-full" aria-label={`${profile.name} 的任务模型`}>
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent position="popper">
+                        <SelectItem value="default">跟随默认（{profile.model}）</SelectItem>
+                        {missingModel && <SelectItem value={`model:${pin}`} disabled>{pin}（已不可用）</SelectItem>}
+                        {availableModels.map((model) => <SelectItem key={model} value={`model:${model}`}>{model}</SelectItem>)}
+                      </SelectContent>
+                    </Select>
+                  ) : (
+                    <p className="truncate text-muted-foreground text-xs">{pin ?? profile?.model ?? "配置已不可用"}</p>
+                  )}
                 </div>
                 <ProfileRoleBadge index={index} currentIndex={currentIndex} />
                 <div className="col-span-2 col-start-2 flex shrink-0 items-center gap-1 justify-self-end sm:col-auto sm:justify-self-auto">

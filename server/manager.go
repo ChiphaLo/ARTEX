@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"os"
 	"path/filepath"
 	"sort"
@@ -42,18 +43,19 @@ type Task struct {
 	// QueuedAt is an internal Unix-nanosecond ordering key. It is deliberately
 	// finer than CreatedAt so several tasks enqueued in the same second retain
 	// their real FIFO order.
-	QueuedAt           int64   `json:"queued_at,omitempty"`
-	QueueMode          string  `json:"queue_mode,omitempty"`
-	ParentRef          string  `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
-	LLMProfileID       *int64  `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
-	LLMProfileIDs      []int64 `json:"llm_profile_ids,omitempty"`
-	ActiveLLMProfileID *int64  `json:"active_llm_profile_id,omitempty"`
-	LLMChainRevision   int64   `json:"-"`
-	LLMFailoverState   string  `json:"llm_failover_state,omitempty"`
-	LLMFailoverReason  string  `json:"llm_failover_reason,omitempty"`
-	SourceTaskIDs      []int64 `json:"source_task_ids,omitempty"`
-	CompanyIDs         []int64 `json:"company_ids,omitempty"`
-	Status             string  `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
+	QueuedAt           int64            `json:"queued_at,omitempty"`
+	QueueMode          string           `json:"queue_mode,omitempty"`
+	ParentRef          string           `json:"parent_ref,omitempty"`     // 父任务 id(编排 spawn 记录)
+	LLMProfileID       *int64           `json:"llm_profile_id,omitempty"` // 指定运行本任务 planner/worker 的 LLM 配置;nil=用全局激活配置
+	LLMProfileIDs      []int64          `json:"llm_profile_ids,omitempty"`
+	LLMModels          map[int64]string `json:"llm_models,omitempty"`
+	ActiveLLMProfileID *int64           `json:"active_llm_profile_id,omitempty"`
+	LLMChainRevision   int64            `json:"-"`
+	LLMFailoverState   string           `json:"llm_failover_state,omitempty"`
+	LLMFailoverReason  string           `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs      []int64          `json:"source_task_ids,omitempty"`
+	CompanyIDs         []int64          `json:"company_ids,omitempty"`
+	Status             string           `json:"status"` // persisted lifecycle status (done/failed/timeout 为终态；空/其它则由运行态推导)
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。DeadlineAt/FirstRunAt 为 unix 秒,0=未设/未运行。
 	TimeoutSeconds       int                    `json:"timeout_seconds"`
 	PlanHeartbeatSeconds int                    `json:"plan_heartbeat_seconds"` // planner 心跳触发间隔(秒)
@@ -147,6 +149,7 @@ func (t *Task) updateLifecycle(update func(*taskLifecycleState)) {
 }
 
 type taskLLMState struct {
+	Models         map[int64]string
 	ProfileID      *int64
 	ProfileIDs     []int64
 	ActiveID       *int64
@@ -167,6 +170,7 @@ func (t *Task) llmStateSnapshot() taskLLMState {
 	t.llmMu.RLock()
 	defer t.llmMu.RUnlock()
 	return taskLLMState{
+		Models:         maps.Clone(t.LLMModels),
 		ProfileID:      cloneInt64Ptr(t.LLMProfileID),
 		ProfileIDs:     append(make([]int64, 0, len(t.LLMProfileIDs)), t.LLMProfileIDs...),
 		ActiveID:       cloneInt64Ptr(t.ActiveLLMProfileID),
@@ -176,7 +180,7 @@ func (t *Task) llmStateSnapshot() taskLLMState {
 	}
 }
 
-func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, revision int64, state, reason string) bool {
+func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, revision int64, state, reason string, models ...map[int64]string) bool {
 	t.llmMu.Lock()
 	defer t.llmMu.Unlock()
 	if revision < t.LLMChainRevision {
@@ -185,6 +189,9 @@ func (t *Task) setLLMState(profileID, activeID *int64, profileIDs []int64, revis
 	t.LLMProfileID = cloneInt64Ptr(profileID)
 	t.ActiveLLMProfileID = cloneInt64Ptr(activeID)
 	t.LLMProfileIDs = append(t.LLMProfileIDs[:0], profileIDs...)
+	if len(models) > 0 {
+		t.LLMModels = maps.Clone(models[0])
+	}
 	t.LLMChainRevision = revision
 	t.LLMFailoverState = state
 	t.LLMFailoverReason = reason
@@ -838,6 +845,7 @@ func taskFromPG(pt *pgdb.Task, store *pgdb.ExplorationStore, ic *intercept.Inter
 		QueuedAt: unixNanoOrZero(pt.QueuedAt), QueueMode: pt.QueueMode,
 		CompletedAt: unixOrZero(pt.CompletedAt), Status: pt.Status, ParentRef: pt.ParentRef,
 		LLMProfileID:  pt.LLMProfileID,
+		LLMModels:     maps.Clone(pt.LLMModels),
 		LLMProfileIDs: append([]int64(nil), pt.LLMProfileIDs...), ActiveLLMProfileID: pt.ActiveLLMProfileID,
 		LLMChainRevision: pt.LLMChainRevision,
 		LLMFailoverState: pt.LLMFailoverState, LLMFailoverReason: pt.LLMFailoverReason,
@@ -1047,12 +1055,12 @@ func (m *Manager) DeleteCompanyWithAssets(id int64, deleteAssets bool) (int64, e
 // ReplaceTaskLLMProfiles resets a task's ordered provider chain and mirrors the
 // committed state onto the live task handle. Terminal tasks are editable too —
 // their 主 Agent 对话 keeps running on the chain after the task finishes.
-func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activeProfileID int64) (int64, error) {
+func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activeProfileID int64, models ...map[int64]string) (int64, error) {
 	n, err := strconv.ParseInt(id, 10, 64)
 	if err != nil {
 		return 0, err
 	}
-	if err := m.pg.ReplaceTaskLLMProfiles(n, profileIDs, activeProfileID); err != nil {
+	if err := m.pg.ReplaceTaskLLMProfiles(n, profileIDs, activeProfileID, models...); err != nil {
 		return 0, err
 	}
 	pt, err := m.pg.GetTask(n)
@@ -1061,7 +1069,7 @@ func (m *Manager) ReplaceTaskLLMProfiles(id string, profileIDs []int64, activePr
 	}
 	m.mu.Lock()
 	if task := m.tasks[id]; task != nil {
-		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason)
+		task.setLLMState(pt.LLMProfileID, pt.ActiveLLMProfileID, pt.LLMProfileIDs, pt.LLMChainRevision, pt.LLMFailoverState, pt.LLMFailoverReason, pt.LLMModels)
 	}
 	m.mu.Unlock()
 	// 终态任务不重开额度阻塞意图:任务已经没有 worker 在跑,重开只会把它们从

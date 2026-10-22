@@ -3082,6 +3082,7 @@ function CreateTaskSheet({
   const [sourceTaskIDs, setSourceTaskIDs] = React.useState<string[]>([]);
   const [companyIDs, setCompanyIDs] = React.useState<number[]>([]);
   const [llmProfileIDs, setLLMProfileIDs] = React.useState<string[]>([]);
+  const [llmModels, setLLMModels] = React.useState<Record<string, string>>({});
   const [creating, setCreating] = React.useState(false);
   const [timeoutMin, setTimeoutMin] = React.useState(""); // 任务级超时(分钟);空/0 = 不限时
   const [heartbeatMin, setHeartbeatMin] = React.useState("10"); // planner 心跳(分钟);默认10,下限10(与后端一致)
@@ -3148,6 +3149,7 @@ function CreateTaskSheet({
         description: description.trim(),
         goal: goal.trim(),
         llmProfileIds: llmProfileIDs.map(Number),
+        llmModels,
         sourceTaskIds: sourceTaskIDs,
         companyIds: companyIDs,
         timeoutSeconds: timeoutSec,
@@ -3167,6 +3169,7 @@ function CreateTaskSheet({
       setSourceTaskIDs([]);
       setCompanyIDs([]);
       setLLMProfileIDs([]);
+      setLLMModels({});
       setTimeoutMin("");
       setHeartbeatMin("10");
       setSeedFirstIntent(false);
@@ -3324,6 +3327,8 @@ function CreateTaskSheet({
                 profiles={profiles}
                 value={llmProfileIDs}
                 onValueChange={setLLMProfileIDs}
+                models={llmModels}
+                onModelsChange={setLLMModels}
                 inputId="llm-profiles"
                 portalContainer={sheetContentRef}
               />

@@ -726,6 +726,8 @@ CREATE TABLE IF NOT EXISTS task_llm_profiles (
     UNIQUE (task_id, position)
 );
 CREATE INDEX IF NOT EXISTS idx_task_llm_profiles_order ON task_llm_profiles(task_id, position);
+-- Empty model retains legacy behavior: follow this Provider's default model.
+ALTER TABLE task_llm_profiles ADD COLUMN IF NOT EXISTS model TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_task_llm_profiles_profile ON task_llm_profiles(profile_id, task_id);
 CREATE INDEX IF NOT EXISTS idx_tasks_llm_profile ON tasks(llm_profile_id) WHERE llm_profile_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_tasks_active_llm_profile ON tasks(active_llm_profile_id) WHERE active_llm_profile_id IS NOT NULL;

@@ -54,6 +54,7 @@ type TaskDTO struct {
 	Findings           FindingSeverityDTO `json:"findings"`                 // 该任务已登记的漏洞数（findings 表，按严重度分档）
 	LLMProfileID       *int64             `json:"llm_profile_id,omitempty"` // LLM profile used for this task; nil = default
 	LLMProfileIDs      []int64            `json:"llm_profile_ids"`
+	LLMModels          map[int64]string   `json:"llm_models,omitempty"`
 	ActiveLLMProfileID *int64             `json:"active_llm_profile_id,omitempty"`
 	LLMFailoverState   string             `json:"llm_failover_state"`
 	LLMFailoverReason  string             `json:"llm_failover_reason,omitempty"`
@@ -128,6 +129,7 @@ func taskDTO(t *Task, status string) TaskDTO {
 		Queued:             lifecycle.Queued,
 		LLMProfileID:       llmState.ProfileID,
 		LLMProfileIDs:      profileIDs,
+		LLMModels:          llmState.Models,
 		ActiveLLMProfileID: llmState.ActiveID,
 		LLMFailoverState:   llmState.FailoverState,
 		LLMFailoverReason:  llmState.FailoverReason,

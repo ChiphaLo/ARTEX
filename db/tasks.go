@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -28,16 +29,17 @@ type Task struct {
 	LLMProfileID  *int64     `json:"llm_profile_id,omitempty"`
 	// Task-level ordered LLM chain. LLMProfileID remains the compatibility alias
 	// for ActiveLLMProfileID while older API clients still send one profile id.
-	LLMProfileIDs      []int64    `json:"llm_profile_ids,omitempty"`
-	ActiveLLMProfileID *int64     `json:"active_llm_profile_id,omitempty"`
-	LLMChainRevision   int64      `json:"-"`
-	LLMFailoverState   string     `json:"llm_failover_state,omitempty"`
-	LLMFailoverReason  string     `json:"llm_failover_reason,omitempty"`
-	SourceTaskIDs      []int64    `json:"source_task_ids,omitempty"`
-	CompanyIDs         []int64    `json:"company_ids,omitempty"`
-	ParentRef          string     `json:"parent_ref,omitempty"` // 父任务 id(编排 spawn 记录;空=顶层)
-	CreatedAt          time.Time  `json:"created_at"`
-	CompletedAt        *time.Time `json:"completed_at,omitempty"` // 进入终态(done/failed/timeout)的时刻;非终态为 nil
+	LLMProfileIDs      []int64          `json:"llm_profile_ids,omitempty"`
+	LLMModels          map[int64]string `json:"llm_models,omitempty"`
+	ActiveLLMProfileID *int64           `json:"active_llm_profile_id,omitempty"`
+	LLMChainRevision   int64            `json:"-"`
+	LLMFailoverState   string           `json:"llm_failover_state,omitempty"`
+	LLMFailoverReason  string           `json:"llm_failover_reason,omitempty"`
+	SourceTaskIDs      []int64          `json:"source_task_ids,omitempty"`
+	CompanyIDs         []int64          `json:"company_ids,omitempty"`
+	ParentRef          string           `json:"parent_ref,omitempty"` // 父任务 id(编排 spawn 记录;空=顶层)
+	CreatedAt          time.Time        `json:"created_at"`
+	CompletedAt        *time.Time       `json:"completed_at,omitempty"` // 进入终态(done/failed/timeout)的时刻;非终态为 nil
 	// 任务级超时(见 docs/任务级超时与收尾设计.md)。
 	TimeoutSeconds int        `json:"timeout_seconds"`        // 0=不限时
 	FirstRunAt     *time.Time `json:"first_run_at,omitempty"` // 首次真正开始运行的时刻(非 created_at);nil=尚未运行
@@ -149,6 +151,7 @@ type TaskCreateOptions struct {
 	SourceTaskIDs        []int64
 	CompanyIDs           []int64
 	LLMProfileIDs        []int64
+	LLMModels            map[int64]string
 	TimeoutSeconds       int
 	PlanHeartbeatSeconds int
 	// CoverageEnabled 是「资产覆盖度功能」开关;nil=默认开(true)，让不关心该开关的创建
@@ -220,6 +223,7 @@ VALUES ($1, 'fact', $2, 0, 'origin', 'system')`, expID, string(originPayload)); 
 		Description: description, Goal: goal, ExplorationID: expID,
 		LLMProfileID: active, ActiveLLMProfileID: active,
 		LLMProfileIDs:  append([]int64(nil), opts.LLMProfileIDs...),
+		LLMModels:      normalizedTaskModels(opts.LLMModels),
 		SourceTaskIDs:  append([]int64(nil), opts.SourceTaskIDs...),
 		CompanyIDs:     append([]int64(nil), opts.CompanyIDs...),
 		TimeoutSeconds: opts.TimeoutSeconds, PlanHeartbeatSeconds: opts.PlanHeartbeatSeconds,
@@ -237,7 +241,7 @@ RETURNING id, status, paused, created_at`, opts.Name, opts.CategoryID, descripti
 	if err := insertTaskCompanies(tx, t.ID, opts.CompanyIDs); err != nil {
 		return nil, err
 	}
-	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs); err != nil {
+	if err := insertTaskLLMProfiles(tx, t.ID, opts.LLMProfileIDs, opts.LLMModels); err != nil {
 		return nil, err
 	}
 	if err := insertTaskInterceptRules(tx, t.ID, opts.InterceptRules); err != nil {
@@ -328,14 +332,21 @@ SELECT $1, id FROM tasks WHERE id=$2 AND deleted_at IS NULL`, taskID, sourceID)
 	return nil
 }
 
-func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64) error {
+func insertTaskLLMProfiles(tx *sql.Tx, taskID int64, profileIDs []int64, selections ...map[int64]string) error {
+	var models map[int64]string
+	if len(selections) > 0 {
+		models = selections[0]
+	}
+	if err := validateTaskModels(tx, profileIDs, models); err != nil {
+		return err
+	}
 	seen := map[int64]bool{}
 	for position, profileID := range profileIDs {
 		if profileID <= 0 || seen[profileID] {
 			return fmt.Errorf("invalid or duplicate LLM profile id %d", profileID)
 		}
 		seen[profileID] = true
-		if _, err := tx.Exec(`INSERT INTO task_llm_profiles(task_id, profile_id, position) VALUES ($1,$2,$3)`, taskID, profileID, position); err != nil {
+		if _, err := tx.Exec(`INSERT INTO task_llm_profiles(task_id, profile_id, position, model) VALUES ($1,$2,$3,$4)`, taskID, profileID, position, strings.TrimSpace(models[profileID])); err != nil {
 			return err
 		}
 	}

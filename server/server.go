@@ -1486,18 +1486,19 @@ func truncateReply(s string) string {
 }
 
 type createTaskReq struct {
-	Name                 string   `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
-	CategoryID           *int64   `json:"category_id,omitempty"`
-	Description          string   `json:"description"`
-	Goal                 string   `json:"goal"`
-	LLMProfileID         *int64   `json:"llm_profile_id,omitempty"`    // 指定运行本任务的 LLM 配置;省略/null=用激活配置
-	LLMProfileIDs        []int64  `json:"llm_profile_ids,omitempty"`   // 有序任务级配置链;第一项初始生效
-	SourceTaskIDs        []string `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
-	CompanyIDs           []int64  `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
-	TimeoutSeconds       int      `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
-	PlanHeartbeatSeconds int      `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
-	SeedFirstIntent      *bool    `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
-	CoverageEnabled      *bool    `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
+	Name                 string           `json:"name,omitempty"` // 可选任务名称;省略/空=未命名
+	CategoryID           *int64           `json:"category_id,omitempty"`
+	Description          string           `json:"description"`
+	Goal                 string           `json:"goal"`
+	LLMProfileID         *int64           `json:"llm_profile_id,omitempty"`  // 指定运行本任务的 LLM 配置;省略/null=用激活配置
+	LLMProfileIDs        []int64          `json:"llm_profile_ids,omitempty"` // 有序任务级配置链;第一项初始生效
+	LLMModels            map[int64]string `json:"llm_models,omitempty"`
+	SourceTaskIDs        []string         `json:"source_task_ids,omitempty"`   // 仅直接、只读继承的来源任务
+	CompanyIDs           []int64          `json:"company_ids,omitempty"`       // 关联企业范围并快照关联当前企业资产;不复制资产或强制生成意图
+	TimeoutSeconds       int              `json:"timeout_seconds"`             // 任务级超时(秒);0/省略=不限时
+	PlanHeartbeatSeconds int              `json:"plan_heartbeat_seconds"`      // planner 心跳触发间隔(秒);0/省略=默认600(10min);下限=默认=600,低于自动抬到600
+	SeedFirstIntent      *bool            `json:"seed_first_intent,omitempty"` // 创建时直接下发一条种子意图(内容=描述+目标),让 worker 免等首轮 planner 直接开跑;省略/null=默认关闭,走标准先规划再执行。显式传 true 才开(CTF 常一 work 解决时可省掉开跑前的 planner 轮)。
+	CoverageEnabled      *bool            `json:"coverage_enabled,omitempty"`  // 资产覆盖度功能;省略/null=默认开(true)。false=关闭覆盖度计算/展示/自动累积范围+隐藏 add_task_scope/list_untested_assets。company 关联不受影响。
 	// InterceptRules 任务级资产拦截/允许规则(创建时录入,存 task_intercept_rules,不进全局表)。
 	InterceptRules []taskInterceptRuleReq `json:"intercept_rules,omitempty"`
 }
@@ -1515,6 +1516,10 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		req.LLMProfileIDs = []int64{*req.LLMProfileID}
 	}
 	if err := s.validateTaskProfileIDs(req.LLMProfileIDs); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+	if err := s.m.pg.ValidateTaskModels(req.LLMProfileIDs, req.LLMModels); err != nil {
 		writeErr(w, 400, err.Error())
 		return
 	}
@@ -1554,11 +1559,16 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 	t, err := s.m.CreateTaskWithOptions(req.Description, req.Goal, db.TaskCreateOptions{
 		Name: strings.TrimSpace(req.Name), CategoryID: req.CategoryID,
 		SourceTaskIDs: sourceIDs, CompanyIDs: req.CompanyIDs, LLMProfileIDs: req.LLMProfileIDs,
+		LLMModels:      req.LLMModels,
 		TimeoutSeconds: req.TimeoutSeconds, PlanHeartbeatSeconds: req.PlanHeartbeatSeconds,
 		CoverageEnabled: req.CoverageEnabled,
 		InterceptRules:  interceptRules,
 	})
 	if err != nil {
+		if errors.Is(err, db.ErrTaskModelInvalid) {
+			writeErr(w, 400, err.Error())
+			return
+		}
 		if errors.Is(err, db.ErrTaskCategoryInvalid) || errors.Is(err, db.ErrTaskCategoryNotFound) {
 			writeErr(w, 400, "任务分类不存在或无效")
 			return
@@ -1601,8 +1611,9 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	// 模型不可用时不换链就等于把已完成任务的交互一起锁死。
 	before := t.llmStateSnapshot()
 	var req struct {
-		LLMProfileIDs      []int64 `json:"llm_profile_ids"`
-		ActiveLLMProfileID *int64  `json:"active_llm_profile_id"`
+		LLMProfileIDs      []int64          `json:"llm_profile_ids"`
+		ActiveLLMProfileID *int64           `json:"active_llm_profile_id"`
+		LLMModels          map[int64]string `json:"llm_models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, "bad json: "+err.Error())
@@ -1616,7 +1627,7 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	if req.ActiveLLMProfileID != nil {
 		active = *req.ActiveLLMProfileID
 	}
-	reopened, err := s.m.ReplaceTaskLLMProfiles(t.ID, req.LLMProfileIDs, active)
+	reopened, err := s.m.ReplaceTaskLLMProfiles(t.ID, req.LLMProfileIDs, active, req.LLMModels)
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -1630,11 +1641,12 @@ func (s *Server) updateTaskLLMProfiles(w http.ResponseWriter, r *http.Request) {
 	llmState := t.llmStateSnapshot()
 	result := map[string]any{
 		"id": t.ID, "llm_profile_ids": llmState.ProfileIDs,
+		"llm_models":            llmState.Models,
 		"active_llm_profile_id": llmState.ActiveID,
 		"llm_failover_state":    llmState.FailoverState, "reopened_intents": reopened,
 	}
-	if !sameOptionalID(before.ActiveID, llmState.ActiveID) {
-		event := s.emitManualTaskLLMSwitch(t, before.ActiveID, llmState.ActiveID)
+	if !sameOptionalID(before.ActiveID, llmState.ActiveID) || selectedTaskModel(before) != selectedTaskModel(llmState) {
+		event := s.emitManualTaskLLMSwitch(t, before.ActiveID, llmState.ActiveID, before.Models, llmState.Models)
 		result["switch_event"] = activityDTO(event)
 	}
 	writeJSON(w, 200, result)
