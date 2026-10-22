@@ -23,9 +23,19 @@ type Props = Omit<React.ComponentProps<"textarea">, "value" | "onChange" | "ref"
   value: string;
   onValueChange: (value: string) => void;
   inputGroup?: boolean;
+  onFiles?: (files: File[]) => void;
 };
 
-export function MentionTextarea({ value, onValueChange, onKeyDown, className, inputGroup, disabled, ...props }: Props) {
+export function MentionTextarea({
+  value,
+  onValueChange,
+  onKeyDown,
+  className,
+  inputGroup,
+  disabled,
+  onFiles,
+  ...props
+}: Props) {
   const textarea = React.useRef<HTMLTextAreaElement>(null);
   const composing = React.useRef(false);
   const pendingKeyboardIndex = React.useRef<number | null>(null);
@@ -194,6 +204,25 @@ export function MentionTextarea({ value, onValueChange, onKeyDown, className, in
           <div>
             <Control
               {...props}
+              onPaste={(e) => {
+                props.onPaste?.(e);
+                if (e.defaultPrevented || disabled || !onFiles) return;
+                const files = Array.from(e.clipboardData.files).filter((f) => f.type.startsWith("image/"));
+                if (files.length) {
+                  e.preventDefault();
+                  onFiles(files);
+                }
+              }}
+              onDragOver={(e) => {
+                props.onDragOver?.(e);
+                if (onFiles && !disabled && e.dataTransfer.types.includes("Files")) e.preventDefault();
+              }}
+              onDrop={(e) => {
+                props.onDrop?.(e);
+                if (e.defaultPrevented || disabled || !onFiles || !e.dataTransfer.files.length) return;
+                e.preventDefault();
+                onFiles(Array.from(e.dataTransfer.files));
+              }}
               ref={textarea}
               value={value}
               disabled={disabled}

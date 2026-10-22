@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/Autumn-27/artex/db"
 )
 
-const maxWorkerMessageBytes = 64 << 10
+const maxWorkerMessageBytes = maxChatMessageBytes
 
 func validWorkerMessageRequestID(id string) bool {
 	if id == "" || len(id) > 128 {
@@ -48,8 +49,9 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxWorkerMessageBytes)
 	var req struct {
-		Message   string `json:"message"`
-		RequestID string `json:"request_id"`
+		Attachments []chatAttachment `json:"attachments,omitempty"`
+		Message     string           `json:"message"`
+		RequestID   string           `json:"request_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		var tooLarge *http.MaxBytesError
@@ -62,12 +64,7 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 	}
 	message := strings.TrimSpace(req.Message)
 	requestID := strings.TrimSpace(req.RequestID)
-	if message == "" {
-		writeErr(w, http.StatusBadRequest, "消息不能为空")
-		return
-	}
-	if len([]rune(message)) > 4000 {
-		writeErr(w, http.StatusBadRequest, "消息不能超过 4000 个字符")
+	if !validInboxMessage(w, message, req.Attachments) {
 		return
 	}
 	if !validWorkerMessageRequestID(requestID) {
@@ -127,7 +124,10 @@ func (s *Server) sendWorkerMessage(w http.ResponseWriter, r *http.Request) {
 	// runDetachedIntent transitions paused->running, emits the user turn and starts a
 	// dedicated run. Root the run at s.ctx so a disconnected browser cannot strand it
 	// while task pause/delete/shutdown still stop it.
-	if err := s.engine.runDetachedIntent(s.ctx, t, iid, requestID, message, agentMessage); err != nil {
+	dir := filepath.Join(s.m.dir, "tasks", t.ID)
+	ctx := withChatImages(s.ctx, dir, req.Attachments)
+	agentMessage = composeAgentMessage(agentMessage, req.Attachments, dir)
+	if err := s.engine.runDetachedIntent(ctx, t, iid, requestID, message, agentMessage, req.Attachments...); err != nil {
 		switch {
 		case errors.Is(err, db.ErrIntentStateConflict):
 			writeErr(w, http.StatusConflict, err.Error())

@@ -15,7 +15,7 @@ type openaiProvider struct{ cfg Config }
 
 type oaMessage struct {
 	Role             string       `json:"role"`
-	Content          string       `json:"content,omitempty"`
+	Content          any          `json:"content,omitempty"`
 	ReasoningContent string       `json:"reasoning_content,omitempty"`
 	ToolCalls        []oaToolCall `json:"tool_calls,omitempty"`
 	ToolCallID       string       `json:"tool_call_id,omitempty"`
@@ -119,16 +119,26 @@ func toOpenAIMessages(system string, msgs []Message) []oaMessage {
 		case RoleUser:
 			var text strings.Builder
 			var toolMsgs []oaMessage
+			var parts []map[string]any
+			hasImage := false
 			for _, b := range m.Content {
 				switch b.Type {
 				case BlockText:
 					text.WriteString(b.Text)
+					parts = append(parts, map[string]any{"type": "text", "text": b.Text})
+				case BlockImage:
+					if b.Source != nil {
+						hasImage = true
+						parts = append(parts, map[string]any{"type": "image_url", "image_url": map[string]string{"url": b.Source.DataURL()}})
+					}
 				case BlockToolResult:
 					toolMsgs = append(toolMsgs, oaMessage{Role: "tool", ToolCallID: b.ToolUseID, Content: flattenText(b.Content)})
 				}
 			}
 			out = append(out, toolMsgs...)
-			if s := text.String(); s != "" {
+			if hasImage {
+				out = append(out, oaMessage{Role: "user", Content: parts})
+			} else if s := text.String(); s != "" {
 				out = append(out, oaMessage{Role: "user", Content: s})
 			}
 		}

@@ -1,4 +1,5 @@
 "use client";
+import { ChatImagePreview, ImagePicker } from "@/components/chat-images";
 
 import * as React from "react";
 
@@ -122,10 +123,6 @@ function PlannerInput({ taskId }: { taskId: string }) {
     const text = message.trim(),
       atts = attachments;
     if (inFlight.current || uploading || (!text && !atts.length)) return;
-    if ([...text].length > 4000) {
-      toast.error("消息最多 4000 字");
-      return;
-    }
     const id = requestID.getID({ taskId, mode, text, attachments: atts });
     inFlight.current = true;
     setSending(true);
@@ -189,12 +186,14 @@ function PlannerInput({ taskId }: { taskId: string }) {
               title="移除附件"
               onClick={() => setAttachments((prev) => prev.filter((p) => p.path !== a.path))}
             >
+              <ChatImagePreview attachment={a} />
               {a.name} ×
             </button>
           ))}
         </div>
       )}
       <MentionTextarea
+        onFiles={disabled ? undefined : upload}
         value={message}
         onValueChange={setMessage}
         disabled={disabled}
@@ -229,7 +228,8 @@ function PlannerInput({ taskId }: { taskId: string }) {
         >
           <PaperclipIcon className="size-4" />
         </Button>
-        <span className="mr-auto text-muted-foreground text-xs">{[...message].length}/4000</span>
+        <ImagePicker onFiles={upload} disabled={disabled} />
+        <span className="mr-auto text-muted-foreground text-xs">{[...message].length}</span>
         <Button
           size="sm"
           variant="outline"

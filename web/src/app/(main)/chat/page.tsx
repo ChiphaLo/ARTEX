@@ -1,4 +1,5 @@
 "use client";
+import { ChatImagePreview, ImagePicker } from "@/components/chat-images";
 
 import * as React from "react";
 
@@ -203,6 +204,7 @@ function Composer({
               className="flex items-center gap-1.5 rounded-md border bg-muted/50 px-2 py-1 text-xs"
               title={a.path}
             >
+              <ChatImagePreview attachment={a} />
               <PaperclipIcon className="size-3 shrink-0 text-primary" />
               <span className="max-w-[160px] truncate">{a.name}</span>
               <span className="text-muted-foreground">{fmtBytes(a.size)}</span>
@@ -248,7 +250,9 @@ function Composer({
             </Button>
           </>
         )}
+        {onPickFiles && <ImagePicker onFiles={onPickFiles} disabled={disabled || uploading} />}
         <MentionTextarea
+          onFiles={uploading ? undefined : onPickFiles}
           className="max-h-40 min-h-10 min-w-0 flex-1 resize-none"
           rows={1}
           placeholder={placeholder}
@@ -777,10 +781,6 @@ function ChatView({
     const atts = attachments;
     if (side.handleCommand(msg, () => setInput(""))) return;
     if ((!msg && atts.length === 0) || sending || uploading) return;
-    if ([...msg].length > 4000) {
-      toast.error("消息最多 4000 字");
-      return;
-    }
     const requestID = inboxRequestID.getID({ scope: conv.id, mode, message: msg, attachments: atts });
     setSending(true);
     setInput("");

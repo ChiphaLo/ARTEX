@@ -1,4 +1,5 @@
 "use client";
+import { ChatImagePreview } from "@/components/chat-images";
 
 import * as React from "react";
 import { createPortal } from "react-dom";
@@ -561,7 +562,7 @@ function fmtBytes(n: number): string {
   return `${n} B`;
 }
 
-type MsgAttachment = { name: string; path: string; size: number };
+type MsgAttachment = { name: string; path: string; size: number; media_type?: string; preview_url?: string };
 
 // parseUserBody splits a user turn's body into text + attachments. The backend stores
 // Detail as JSON {text, attachments} when files were uploaded, else plain text — so we
@@ -621,6 +622,7 @@ function UserRow({
                 className="flex min-w-0 max-w-full items-center gap-1.5 rounded-md border bg-card px-2 py-1 text-xs shadow-sm"
                 title={a.path}
               >
+                <ChatImagePreview attachment={a} />
                 <PaperclipIcon className="size-3 shrink-0 text-primary" />
                 <span className="max-w-[180px] truncate font-medium">{a.name}</span>
                 <span className="shrink-0 text-muted-foreground">{fmtBytes(a.size)}</span>

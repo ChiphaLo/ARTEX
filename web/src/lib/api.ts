@@ -325,7 +325,12 @@ export const api = {
     input: Partial<Pick<TaskTemplate, "name" | "description" | "goal" | "category_id" | "intercept_rules">>,
   ) => patch<TaskTemplate>(`/task-templates/${id}`, input),
   deleteTaskTemplate: (id: number) => del<{ deleted: number }>(`/task-templates/${id}`),
-  updateTaskLLMProfiles: (id: string, llmProfileIds: number[], activeLLMProfileId?: number, llmModels?: Record<string, string>) =>
+  updateTaskLLMProfiles: (
+    id: string,
+    llmProfileIds: number[],
+    activeLLMProfileId?: number,
+    llmModels?: Record<string, string>,
+  ) =>
     put<{
       id: string;
       llm_profile_ids: number[];
@@ -378,13 +383,19 @@ export const api = {
       state: "paused" | "open" | "deleted" | "";
       deleted?: { intents: number; facts: number; findings: number; activities: number };
     }>(`/tasks/${taskId}/intents/${intentId}/control`, { action, reason: reason ?? "", mode: mode ?? "soft" }),
-  sendWorkerMessage: (taskId: string, intentId: string, message: string, requestId: string) =>
+  sendWorkerMessage: (
+    taskId: string,
+    intentId: string,
+    message: string,
+    requestId: string,
+    attachments?: ChatAttachment[],
+  ) =>
     post<{
       id: number;
       state: "running";
       accepted: true;
       request_id: string;
-    }>(`/tasks/${taskId}/intents/${intentId}/messages`, { message, request_id: requestId }),
+    }>(`/tasks/${taskId}/intents/${intentId}/messages`, { message, request_id: requestId, attachments }),
   taskLLMResolution: (id: string) => get<TaskLLMResolutions>(`/tasks/${id}/llm/resolution`),
   // 重跑一条没跑成功的意图(blocked/exhausted/stopped)：置回 open，worker 会重新认领、从头再跑。
   rerunIntent: (taskId: string, intentId: string) =>

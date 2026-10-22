@@ -20,6 +20,7 @@ import (
 type inboxProvider struct {
 	mu          sync.Mutex
 	messages    []string
+	imageCounts []int
 	backgrounds []string
 	started     chan context.Context
 	release     chan struct{}
@@ -36,6 +37,15 @@ func (p *inboxProvider) Complete(ctx context.Context, req llm.CompletionRequest)
 	bg := intercept.CurrentReviewBackground(ctx)
 	p.mu.Lock()
 	p.messages = append(p.messages, msg)
+	count := 0
+	for _, m := range req.Messages {
+		for _, b := range m.Content {
+			if b.Type == llm.BlockImage && b.Source != nil {
+				count++
+			}
+		}
+	}
+	p.imageCounts = append(p.imageCounts, count)
 	p.backgrounds = append(p.backgrounds, bg.Text)
 	first := len(p.messages) == 1
 	p.mu.Unlock()
@@ -297,7 +307,6 @@ func TestAgentInboxAdmissionValidationAndRunningReadOnly(t *testing.T) {
 	for _, body := range []map[string]any{
 		{"message": "test", "mode": "queue", "request_id": "bad id"},
 		{"message": "test", "mode": "invalid", "request_id": "valid"},
-		{"message": strings.Repeat("中", 4001), "mode": "queue", "request_id": "long"},
 		{"message": "", "mode": "steer", "request_id": "empty"},
 	} {
 		w := inboxRequest(t, s, task, 0, body)

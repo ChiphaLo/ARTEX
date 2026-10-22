@@ -123,7 +123,12 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 
 	var finalText string
 	var rerr error
-	for ev, err := range s.Prompt(ctx, input) {
+	blocks, inputErr := takeInputContent(ctx)
+	if inputErr != nil {
+		reason = harness.ReasonImageError
+		return "", reason, inputErr
+	}
+	for ev, err := range s.PromptWithContent(ctx, input, blocks) {
 		if err != nil {
 			flush()
 			if ctx.Err() != nil { // engine/user cancellation, not a provider failure

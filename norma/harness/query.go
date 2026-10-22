@@ -894,7 +894,7 @@ func (l *loop) injectPendingMessages() bool {
 		}
 		valid := true
 		for _, block := range message.Content {
-			if block.Type != llm.BlockText {
+			if block.Type != llm.BlockText && !(block.Type == llm.BlockImage && block.Source != nil) {
 				valid = false
 			}
 		}

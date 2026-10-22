@@ -1018,6 +1018,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 		return true
 	}
 	// per-work child context so the planner's kill_work can stop just this work.
+	ectx = agent.InheritInputContent(ectx, ctx)
 	workCtx, workCancel := context.WithCancelCause(ectx)
 	e.registerWork(intent.ID, workCancel)
 	// wrap the guard hooks so steer_work can inject a mid-run course-correction
@@ -1194,7 +1195,7 @@ func (e *Engine) runIntent(ctx context.Context, t *Task, name string, worker *ag
 // server root, never the HTTP request, so a disconnect cannot strand the run while
 // task pause/delete/shutdown still stops it). Returns an error if the run could not
 // be started; the intent is left untouched in that case.
-func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string) error {
+func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64, requestID, message, agentMessage string, attachments ...chatAttachment) error {
 	if !e.beginTaskOperation(t.ID) {
 		return fmt.Errorf("task is being deleted")
 	}
@@ -1228,7 +1229,12 @@ func (e *Engine) runDetachedIntent(ctx context.Context, t *Task, intentID int64,
 	// Keep the UI copy concise; ExecuteWithMessage writes the server-resolved
 	// reference snapshot into the intent transcript as the LLM input.
 	uid := intentID
-	e.emitActivity(t, db.Activity{NodeID: &uid, Worker: "user", Kind: "user", Summary: message, Detail: message})
+	activity := userActivityWithAttachments("user", message, attachments)
+	activity.NodeID = &uid
+	if len(attachments) == 0 {
+		activity.Detail = message
+	}
+	e.emitActivity(t, activity)
 	release = false // ownership of the admission passes to the goroutine
 	go func() {
 		defer e.decInflight(t.ID)

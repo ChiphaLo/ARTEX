@@ -22,6 +22,7 @@ type BlockType string
 
 const (
 	BlockText       BlockType = "text"
+	BlockImage      BlockType = "image"
 	BlockThinking   BlockType = "thinking"
 	BlockToolUse    BlockType = "tool_use"
 	BlockToolResult BlockType = "tool_result"
@@ -32,6 +33,8 @@ const (
 type ContentBlock struct {
 	ContextID string    `json:"-"` // local transcript identity; never sent to providers
 	Type      BlockType `json:"type"`
+
+	Source *ImageSource `json:"source,omitempty"`
 
 	// Text block.
 	Text string `json:"text,omitempty"`
@@ -52,6 +55,15 @@ type ContentBlock struct {
 	Content   []ContentBlock `json:"content,omitempty"`
 	IsError   bool           `json:"is_error,omitempty"`
 }
+
+// ImageSource uses Anthropic's base64 source shape; other adapters translate it.
+type ImageSource struct {
+	Type      string `json:"type"`
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
+}
+
+func (s *ImageSource) DataURL() string { return "data:" + s.MediaType + ";base64," + s.Data }
 
 // TextBlock builds a text content block.
 func TextBlock(s string) ContentBlock { return ContentBlock{Type: BlockText, Text: s} }

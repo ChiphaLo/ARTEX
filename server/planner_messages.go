@@ -52,7 +52,7 @@ func (s *Server) sendPlannerMessage(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 409, "任务正在删除")
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatMessageBytes)
 	var req struct {
 		Message     string           `json:"message"`
 		Mode        string           `json:"mode"`
@@ -172,6 +172,7 @@ func (s *Server) sendPlannerMessage(w http.ResponseWriter, r *http.Request) {
 		dir := filepath.Join(s.m.dir, "tasks", t.ID)
 		ctx = s.attachLiveInbox(ctx, scope, "planner", dir, emit)
 		input := composeAgentMessage(message, req.Attachments, dir)
+		ctx = withChatImages(ctx, dir, req.Attachments)
 		s.engine.BeginLLMCall(t.ID)
 		var met bool
 		met, _, runErr = p.PlanWithMessage(ctx, taskNumericID(t.ID), s.m.Assets(), t.Store, t.Goal, input, control != nil, emit)

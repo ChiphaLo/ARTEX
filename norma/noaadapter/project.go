@@ -1,7 +1,9 @@
 package noaadapter
 
 import (
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"strings"
 
 	"github.com/Autumn-27/norma/llm"
@@ -94,6 +96,12 @@ func projectBlock(role llm.Role, b llm.ContentBlock, toolNames map[string]string
 			text = StripRefTag(text)
 		}
 		return noa.CoreMessage{Role: r, ContentType: noa.CTText, Text: text}, true
+
+	case llm.BlockImage:
+		// A stable digest is addressable without leaking base64 into summaries.
+		raw, _ := json.Marshal(b.Source)
+		digest := sha256.Sum256(raw)
+		return noa.CoreMessage{Role: noa.RoleUser, ContentType: noa.CTText, Text: fmt.Sprintf("[uploaded image %x]", digest[:8])}, true
 
 	case llm.BlockThinking:
 		return noa.CoreMessage{Role: noa.RoleAssistant, ContentType: noa.CTReasoning, Text: b.Thinking}, true

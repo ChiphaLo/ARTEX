@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	maxConversationRequestBytes  = 64 << 10
+	maxConversationRequestBytes  = maxChatMessageBytes
 	maxConversationAgentKeyRunes = 120
 	maxConversationTitleRunes    = 200
 )
@@ -418,8 +418,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	}
 	control := resumeControl(r.Context())
 	msg := strings.TrimSpace(req.Message)
-	if control == nil && msg == "" && len(req.Attachments) == 0 {
-		writeErr(w, 400, "消息不能为空")
+	if control == nil && !validInboxMessage(w, msg, req.Attachments) {
 		return
 	}
 	agentMessage := ""
@@ -511,6 +510,7 @@ func (s *Server) pgSendConversationMessage(w http.ResponseWriter, r *http.Reques
 	// conv-<id>/), matching chatUpload's landing dir and agent/chat.go's sessionWorkDir
 	// — busyKey == convBusyKey(c.ID) == "conv-<id>" == that session id.
 	baseDir := filepath.Join(s.m.dir, "sessions", busyKey)
+	ctx = withChatImages(ctx, baseDir, req.Attachments)
 	go s.runConversationTurn(ctx, cancel, c, composeAgentMessage(agentMessage, req.Attachments, baseDir), busyKey)
 	writeJSON(w, 202, map[string]any{"status": "accepted"})
 }

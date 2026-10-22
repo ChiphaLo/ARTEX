@@ -836,6 +836,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/report", s.getReport)
 	mux.HandleFunc("GET /api/chat/mentions", s.searchChatMentions)
 	mux.HandleFunc("POST /api/chat", s.chat)
+	mux.HandleFunc("GET /api/chat/image", s.chatImage)
 	mux.HandleFunc("POST /api/chat/upload", s.chatUpload) // 方式1 文件上传:落到会话/任务工作目录 uploads/
 	mux.HandleFunc("GET /api/tasks/{id}/chat/status", s.taskChatStatus)
 	mux.HandleFunc("POST /api/tasks/{id}/chat/stop", s.stopChat)
@@ -3730,6 +3731,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		Attachments []chatAttachment `json:"attachments,omitempty"` // 方式1 上传的文件(路径相对任务工作目录)
 		Seg         *int             `json:"seg,omitempty"`         // 目标主会话分段;缺省=最新段
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatMessageBytes)
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeErr(w, 400, err.Error())
 		return
@@ -3745,6 +3747,9 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 		mainSeg, _ = t.Store.CurrentMainSeg()
 	}
 	control := resumeControl(r.Context())
+	if control == nil && !validInboxMessage(w, req.Message, req.Attachments) {
+		return
+	}
 	agentMessage := ""
 	if control != nil {
 		agentMessage = s.continuationInput(mainInboxScope(t.ID, mainSeg), t, 0, mainSeg)
@@ -3876,6 +3881,7 @@ func (s *Server) chat(w http.ResponseWriter, r *http.Request) {
 			// taskDir = agent 的工作目录(CWD),与 chatUpload 落盘、ensureRunDir 一致。
 			taskDir := filepath.Join(s.m.dir, "tasks", t.ID)
 			agentMsg := composeAgentMessage(agentMessage, req.Attachments, taskDir)
+			ctx = withChatImages(ctx, taskDir, req.Attachments)
 			ctx = s.attachLiveInbox(ctx, mainInboxScope(t.ID, mainSeg), "mainagent", taskDir, emit)
 			s.engine.BeginLLMCall(t.ID)
 			_, err := ma.Chat(ctx, maTaskID, mainSeg, s.m.Assets(), t.Store, t.Goal, agentMsg, emit, t.Notify, resume, t.NotifyGoal, t.NotifyHint)

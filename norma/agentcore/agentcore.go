@@ -450,6 +450,11 @@ type hookFirer interface {
 // final event is KindResult; Session state is updated when the consumer reaches
 // it (FR-07.3).
 func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Event, error] {
+	return s.PromptWithContent(ctx, input, nil)
+}
+
+// PromptWithContent records image blocks with the user turn, including replay.
+func (s *Session) PromptWithContent(ctx context.Context, input string, blocks []llm.ContentBlock) iter.Seq2[harness.Event, error] {
 	// Auto-inject memories relevant to this prompt (Phase 4).
 	if s.opts.Memory != nil && s.opts.Memory.AutoInject && s.opts.Memory.Store != nil {
 		max := s.opts.Memory.MaxInject
@@ -489,6 +494,7 @@ func (s *Session) Prompt(ctx context.Context, input string) iter.Seq2[harness.Ev
 		}
 	}
 	userMsg := llm.UserText(input)
+	userMsg.Content = append(userMsg.Content, blocks...)
 	s.messages = append(s.messages, userMsg)
 	if s.writer != nil {
 		s.writer.RecordMessage(userMsg, llm.Usage{})

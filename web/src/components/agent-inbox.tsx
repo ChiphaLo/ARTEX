@@ -1,4 +1,5 @@
 "use client";
+import { ChatImagePreview } from "@/components/chat-images";
 
 import * as React from "react";
 
@@ -231,7 +232,13 @@ function InboxList({ base, refreshKey }: { base: string; refreshKey: number }) {
             </div>
             {item.attachments?.length ? (
               <p className="mt-1 truncate text-muted-foreground">
-                附件：{item.attachments.map((a) => a.name).join("、")}
+                附件：
+                {item.attachments.map((a) => (
+                  <span key={a.path}>
+                    <ChatImagePreview attachment={a} />
+                    {a.name}{" "}
+                  </span>
+                ))}
               </p>
             ) : null}
             {editing?.id === item.id && (
@@ -258,7 +265,7 @@ function InboxList({ base, refreshKey }: { base: string; refreshKey: number }) {
                 <div className="mt-1 flex gap-2">
                   <Button
                     size="sm"
-                    disabled={busy || !sortable || (!text.trim() && !attachments.length) || [...text].length > 4000}
+                    disabled={busy || !sortable || (!text.trim() && !attachments.length)}
                     onClick={() =>
                       void mutate(() => api.editAgentInbox(base, item.id, text, editing.revision, attachments))
                     }

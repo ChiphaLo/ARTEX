@@ -360,7 +360,7 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 		writeJSON(w, 200, map[string]any{"items": items, "current": current, "next_cursor": next, "snapshot": meta})
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 32<<10)
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatMessageBytes)
 	var in struct {
 		Question string `json:"question"`
 		ClientID string `json:"client_request_id"`
@@ -370,8 +370,8 @@ func (s *Server) handleSideQuestions(w http.ResponseWriter, r *http.Request, p s
 		return
 	}
 	in.Question = strings.TrimSpace(in.Question)
-	if in.Question == "" || len([]rune(in.Question)) > 4000 || !validWorkerMessageRequestID(in.ClientID) {
-		writeErr(w, 400, "问题须为 1–4000 字符，并提供有效请求 ID")
+	if in.Question == "" || !validWorkerMessageRequestID(in.ClientID) {
+		writeErr(w, 400, "问题不能为空，并提供有效请求 ID")
 		return
 	}
 	s.side.commands.Lock()

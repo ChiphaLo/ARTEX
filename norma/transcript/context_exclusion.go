@@ -183,6 +183,26 @@ func (s *Store) ExcludeSelection(session, kind, text, toolID string, userProject
 	if toolID == "" && len(ids) > 1 {
 		return fmt.Errorf("存在多条相同原文，无法唯一定位；为避免误删，本次未修改")
 	}
+	if kind == "user" {
+		for _, r := range recs {
+			if r.Message == nil || r.Message.Role != llm.RoleUser {
+				continue
+			}
+			selected := false
+			for _, b := range r.Message.Content {
+				if ids[b.ContextID] {
+					selected = true
+				}
+			}
+			if selected {
+				for _, b := range r.Message.Content {
+					if b.Type == llm.BlockImage {
+						ids[b.ContextID] = true
+					}
+				}
+			}
+		}
+	}
 	// Both sides of a tool exchange are selected together.
 	for _, r := range recs {
 		if r.Message != nil {

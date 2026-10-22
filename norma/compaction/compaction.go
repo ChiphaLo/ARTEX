@@ -152,13 +152,13 @@ func EstimateTokens(msgs []llm.Message) int {
 	return chars / 4
 }
 
-// blockChars is the per-block character footprint. A Norma ContentBlock has no
-// image/document type; if one is added, its fixed 2000-token cost (claude-code
-// IMAGE_MAX_TOKEN_SIZE) would be added here.
+// blockChars estimates text and visual-token footprint without counting base64.
 func blockChars(b llm.ContentBlock) int {
 	switch b.Type {
 	case llm.BlockText:
 		return len(b.Text)
+	case llm.BlockImage:
+		return 8192 * 4 // approximate visual tokens, not base64 characters
 	case llm.BlockThinking:
 		return len(b.Thinking)
 	case llm.BlockToolUse:

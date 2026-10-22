@@ -902,9 +902,6 @@ function sendMockWorkerMessage(
     return { ok: false, state: intent.state, error: "仅已暂停的 Worker 可以发送消息，请先暂停" };
   }
   if (!normalizedMessage) return { ok: false, state: intent.state, error: "消息不能为空" };
-  if (Array.from(normalizedMessage).length > 4000) {
-    return { ok: false, state: intent.state, error: "消息不能超过 4000 个字符" };
-  }
 
   // The real endpoint transitions the intent paused->running, records the user turn,
   // and runs it in a dedicated goroutine outside the worker pool. Keep the mock in

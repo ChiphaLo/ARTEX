@@ -634,6 +634,8 @@ export type ActivityKind =
 
 // ChatAttachment 是一次上传的文件:path 相对该会话/任务工作目录(即 agent 的 CWD)。
 export interface ChatAttachment {
+  media_type?: string;
+  preview_url?: string;
   name: string;
   path: string;
   size: number;

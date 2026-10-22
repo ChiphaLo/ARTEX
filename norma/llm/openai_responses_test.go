@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -218,7 +219,7 @@ func TestToResponsesInput(t *testing.T) {
 	}
 	// thinking must not leak into any item.
 	for _, it := range in {
-		if strings.Contains(it.Content, "dropped") {
+		if strings.Contains(fmt.Sprint(it.Content), "dropped") {
 			t.Fatalf("thinking leaked: %+v", it)
 		}
 	}

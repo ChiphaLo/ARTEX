@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -23,9 +24,11 @@ var safeChatID = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
 // to the chat's working dir (e.g. "uploads/report.txt"), which is the agent's CWD, so
 // it can Read/Bash the file directly; Name/Size drive the UI card.
 type chatAttachment struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
-	Size int64  `json:"size"`
+	MediaType  string `json:"media_type,omitempty"`
+	PreviewURL string `json:"preview_url,omitempty"`
+	Name       string `json:"name"`
+	Path       string `json:"path"`
+	Size       int64  `json:"size"`
 	// Abs 是落盘的绝对路径(m.dir 已是绝对)。建任务前暂存(scope=staging)时前端要用它把
 	// 提示词写进描述;task/session 走 composeAgentMessage 在后端拼路径,不依赖此字段。
 	Abs string `json:"abs,omitempty"`
@@ -33,7 +36,7 @@ type chatAttachment struct {
 
 // chatUpload implements method-1 file support: it saves one or more files into a chat's
 // working dir under uploads/, so the agent opens them with its existing Read/Bash tools
-// and the sent message carries their paths. No LLM-layer change, no multimodal.
+// and the sent message carries their paths. Supported images also become vision blocks.
 //
 // POST /api/chat/upload?scope=task|session|staging&id=<id>, multipart field "file"
 // (repeatable). Returns {attachments:[{name,path,size,abs}]}. Target dir mirrors the
@@ -84,10 +87,34 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "解析上传失败或超出大小限制: "+err.Error())
 		return
 	}
+	defer r.MultipartForm.RemoveAll()
 	files := r.MultipartForm.File["file"]
+	if len(files) > 32 {
+		writeErr(w, 400, "附件最多 32 个")
+		return
+	}
 	if len(files) == 0 {
 		writeErr(w, 400, "缺少上传文件(表单字段 file)")
 		return
+	}
+	// Validate image sizes before writing any files from this request.
+	var imageBytes int64
+	for _, hdr := range files {
+		f, err := hdr.Open()
+		if err != nil {
+			writeErr(w, 400, "无法读取上传文件")
+			return
+		}
+		head := make([]byte, 512)
+		n, _ := f.Read(head)
+		f.Close()
+		if supportedChatImage(http.DetectContentType(head[:n])) {
+			imageBytes += hdr.Size
+			if hdr.Size > maxImageBytes || imageBytes > maxTurnImageBytes {
+				writeErr(w, 400, "图片单张最多 10 MiB，每次上传图片合计最多 20 MiB")
+				return
+			}
+		}
 	}
 	out := make([]chatAttachment, 0, len(files))
 	for _, hdr := range files {
@@ -101,7 +128,19 @@ func (s *Server) chatUpload(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		base := filepath.Base(dest)
-		out = append(out, chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size, Abs: dest})
+		a := chatAttachment{Name: base, Path: "uploads/" + base, Size: hdr.Size, Abs: dest}
+		f, err := os.Open(dest)
+		if err == nil {
+			head := make([]byte, 512)
+			n, _ := f.Read(head)
+			f.Close()
+			mime := http.DetectContentType(head[:n])
+			if supportedChatImage(mime) {
+				a.MediaType = mime
+				a.PreviewURL = "/api/chat/image?" + url.Values{"scope": {r.URL.Query().Get("scope")}, "id": {id}, "path": {a.Path}}.Encode()
+			}
+		}
+		out = append(out, a)
 	}
 	writeJSON(w, 200, map[string]any{"attachments": out})
 }

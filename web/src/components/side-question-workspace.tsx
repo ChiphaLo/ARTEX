@@ -166,7 +166,6 @@ function SidePanel({
             aria-label="旁路问题"
             placeholder="询问当前上下文…"
             value={side.draft}
-            maxLength={4000}
             disabled={side.busy}
             onChange={(event) => side.setDraft(event.target.value)}
             onKeyDown={(event) => {

@@ -47,7 +47,7 @@ type orReasoning struct {
 type orInputItem struct {
 	Type      string `json:"type,omitempty"`
 	Role      string `json:"role,omitempty"`
-	Content   string `json:"content,omitempty"`
+	Content   any    `json:"content,omitempty"`
 	CallID    string `json:"call_id,omitempty"`
 	Name      string `json:"name,omitempty"`
 	Arguments string `json:"arguments,omitempty"`
@@ -114,6 +114,11 @@ func toResponsesInput(msgs []Message) []orInputItem {
 			switch b.Type {
 			case BlockText:
 				text.WriteString(b.Text)
+			case BlockImage:
+				flushText()
+				if b.Source != nil {
+					out = append(out, orInputItem{Role: role, Content: []map[string]string{{"type": "input_image", "image_url": b.Source.DataURL()}}})
+				}
 			case BlockToolUse:
 				flushText()
 				args := string(b.Input)

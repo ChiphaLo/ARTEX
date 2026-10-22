@@ -1,4 +1,5 @@
 "use client";
+import { ChatImagePreview, ImagePicker } from "@/components/chat-images";
 
 import * as React from "react";
 
@@ -104,7 +105,6 @@ const PAGE = 200; // history page size
 const SYSTEM_SCAN_PAGE = 500; // generic activity pages scanned to recover sparse system audit events
 const MAX_KEEP = 4000; // per-session in-memory cap; older pages re-fetched on scroll-up
 const STREAM_WINDOW_MS = 5000; // "live" = activity seen within this window
-const MAX_WORKER_MESSAGE_CHARS = 4000;
 
 function newWorkerMessageRequestID(): string {
   return (
@@ -552,12 +552,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const [workerMessage, setWorkerMessage] = React.useState("");
   const [workerMessageRequestId, setWorkerMessageRequestId] = React.useState("");
   const [workerMessageSending, setWorkerMessageSending] = React.useState(false);
+  const [workerAttachments, setWorkerAttachments] = React.useState<ChatAttachment[]>([]);
+  const [workerUploading, setWorkerUploading] = React.useState(false);
   // 方式1 文件上传:选好的附件(已落到任务工作目录 uploads/),随下条消息一起发。
   const [attachments, setAttachments] = React.useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = React.useState(false);
   const fileInputRef = React.useRef<HTMLInputElement>(null);
 
-  async function pickFiles(files: FileList | null) {
+  async function pickFiles(files: FileList | File[] | null) {
     if (!files || files.length === 0) return;
     setUploading(true);
     try {
@@ -1272,6 +1274,27 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   };
 
   const active = sessions.find((s) => s.id === activeId) ?? MAIN_SESSION;
+  const workerScope = React.useRef(active.intent_id);
+  workerScope.current = active.intent_id;
+  React.useEffect(() => {
+    setWorkerAttachments([]);
+  }, [active.intent_id]);
+  async function pickWorkerImages(files: File[]) {
+    const scope = active.intent_id;
+    if (workerUploading || workerMessageSending) return;
+    setWorkerUploading(true);
+    try {
+      const r = await api.chatUpload("task", taskId, files);
+      if (workerScope.current === scope) {
+        setWorkerAttachments((a) => [...a, ...r.attachments]);
+        setWorkerMessageRequestId("");
+      }
+    } catch (e) {
+      toast.error(`上传失败：${(e as Error).message}`);
+    } finally {
+      setWorkerUploading(false);
+    }
+  }
   const side = useSideQuestions(
     active.role === "mainagent"
       ? `/api/tasks/${taskId}/chat`
@@ -1542,21 +1565,26 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const intentId = active.intent_id;
     const message = workerMessage.trim();
     if (side.handleCommand(message, () => setWorkerMessage(""))) return;
-    if (!intentId || active.inherited || active.status !== "paused" || workerMessageSending || !message) return;
-    if (workerMessageCharCount(message) > MAX_WORKER_MESSAGE_CHARS) {
-      toast.error(`消息不能超过 ${MAX_WORKER_MESSAGE_CHARS} 个字符`);
+    if (
+      !intentId ||
+      active.inherited ||
+      active.status !== "paused" ||
+      workerMessageSending ||
+      workerUploading ||
+      (!message && !workerAttachments.length)
+    )
       return;
-    }
     const requestId = workerMessageRequestId || newWorkerMessageRequestID();
     if (!workerMessageRequestId) setWorkerMessageRequestId(requestId);
     setWorkerMessageSending(true);
     api
-      .sendWorkerMessage(taskId, intentId, message, requestId)
+      .sendWorkerMessage(taskId, intentId, message, requestId, workerAttachments)
       .then((result) => {
         // The server records the user turn and streams the run over SSE, so there is
         // no optimistic insert: the message and the continuation arrive live.
         patchIntentState(intentId, result.state);
         setWorkerMessage("");
+        setWorkerAttachments([]);
         setWorkerMessageRequestId("");
         toast.success(`消息已发送给 Worker #${intentId}，已立即继续执行`);
       })
@@ -1944,6 +1972,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                         className="flex items-center gap-1.5 rounded-md border bg-muted/50 px-2 py-1 text-xs"
                         title={a.path}
                       >
+                        <ChatImagePreview attachment={a} />
                         <PaperclipIcon className="size-3 shrink-0 text-primary" />
                         <span className="max-w-[160px] truncate">{a.name}</span>
                         <span className="text-muted-foreground">{fmtBytes(a.size)}</span>
@@ -1976,6 +2005,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                         ? "运行中：Enter 排队，Steer 不打断；/btw 旁路提问…"
                         : "给主 Agent 发消息，@ 引用漏洞、资产等…"
                     }
+                    onFiles={uploading ? undefined : pickFiles}
                     value={input}
                     disabled={sending}
                     onValueChange={setInput}
@@ -1987,12 +2017,13 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     className="max-h-36 min-h-9 overflow-y-auto"
                   />
                   <InputGroupAddon align="block-end">
+                    <ImagePicker onFiles={pickFiles} disabled={uploading || sending} />
                     <InputGroupButton
                       size="icon-xs"
                       variant="ghost"
                       onClick={() => fileInputRef.current?.click()}
                       disabled={sending || uploading}
-                      title="上传文件"
+                      title="上传文件或图片"
                       aria-label="上传文件"
                     >
                       {uploading ? <Loader2Icon className="animate-spin" /> : <PaperclipIcon />}
@@ -2064,6 +2095,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                     rows={1}
                     aria-label={`给 Worker #${active.intent_id} 发消息`}
                     placeholder={`给 Worker #${active.intent_id} 发消息，@ 引用记录，调整执行方向…`}
+                    onFiles={workerUploading ? undefined : pickWorkerImages}
                     value={workerMessage}
                     onValueChange={(value) => {
                       setWorkerMessage(value);
@@ -2075,18 +2107,28 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                       sendWorkerChat();
                     }}
                     disabled={workerMessageSending}
-                    aria-invalid={workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS}
                     className="max-h-36 min-h-9 overflow-y-auto"
                   />
                   <InputGroupAddon align="block-end">
-                    <span
-                      className={cn(
-                        "px-1 text-[10px] tabular-nums text-muted-foreground",
-                        workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS && "text-destructive",
-                      )}
-                    >
-                      {workerMessageCharCount(workerMessage)}/{MAX_WORKER_MESSAGE_CHARS}
+                    <span className={cn("px-1 text-[10px] tabular-nums text-muted-foreground")}>
+                      {workerMessageCharCount(workerMessage)}
                     </span>
+                    <ImagePicker onFiles={pickWorkerImages} disabled={workerUploading || workerMessageSending} />
+                    {workerAttachments.map((a) => (
+                      <button
+                        type="button"
+                        key={a.path}
+                        disabled={workerMessageSending}
+                        title="移除附件"
+                        onClick={() => {
+                          setWorkerAttachments((all) => all.filter((x) => x.path !== a.path));
+                          setWorkerMessageRequestId("");
+                        }}
+                      >
+                        <ChatImagePreview attachment={a} />
+                        {a.name} ×
+                      </button>
+                    ))}
                     {active.status === "running" && isBtwCommand(workerMessage) && (
                       <InputGroupButton size="icon-xs" onClick={sendWorkerChat} aria-label="发送旁路问题">
                         <ArrowUpIcon />
@@ -2131,8 +2173,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
                           onClick={sendWorkerChat}
                           disabled={
                             workerMessageSending ||
-                            !workerMessage.trim() ||
-                            workerMessageCharCount(workerMessage) > MAX_WORKER_MESSAGE_CHARS
+                            (!workerMessage.trim() && !workerAttachments.length) ||
+                            workerUploading
                           }
                           title="发送消息"
                           aria-label="发送消息"

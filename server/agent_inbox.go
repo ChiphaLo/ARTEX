@@ -61,8 +61,14 @@ func inboxMetadata(a *db.Activity, mode string, id int64) {
 }
 func mainInboxScope(taskID string, seg int) string { return fmt.Sprintf("main:%s:%d", taskID, seg) }
 func validInboxMessage(w http.ResponseWriter, msg string, atts []chatAttachment) bool {
-	if (strings.TrimSpace(msg) == "" && len(atts) == 0) || len([]rune(msg)) > 4000 || len(atts) > 32 {
-		writeErr(w, 400, "消息不能为空且最多 4000 字，附件最多 32 个")
+	for _, a := range atts {
+		if !validAttachmentPath(a.Path) {
+			writeErr(w, 400, "非法附件路径")
+			return false
+		}
+	}
+	if (strings.TrimSpace(msg) == "" && len(atts) == 0) || len(atts) > 32 {
+		writeErr(w, 400, "消息不能为空，附件最多 32 个")
 		return false
 	}
 	return true
@@ -132,7 +138,15 @@ func (s *Server) attachLiveInbox(ctx context.Context, scope, worker, baseDir str
 			mu.Lock()
 			background = intercept.ReviewBackground{Source: intercept.BackgroundUserMessage, Text: p.Message}
 			mu.Unlock()
-			messages = append(messages, llm.UserText(liveSteerPrefix+composeAgentMessage(p.AgentMessage, p.Attachments, baseDir)))
+			msg := llm.UserText(liveSteerPrefix + composeAgentMessage(p.AgentMessage, p.Attachments, baseDir))
+			images, err := chatImageBlocks(baseDir, p.Attachments)
+			if err != nil {
+				emit(db.Activity{Worker: worker, Kind: "text", IsError: true, Summary: "Steer 图片读取失败：" + err.Error()})
+				msg.Content = append(msg.Content, llm.TextBlock("[附件读取失败："+err.Error()+"]"))
+			} else {
+				msg.Content = append(msg.Content, images...)
+			}
+			messages = append(messages, msg)
 		}
 		return messages
 	})
@@ -337,6 +351,7 @@ func (s *Server) deliverInbox(ctx context.Context, cancel context.CancelCauseFun
 // Scoped APIs: running messages are read-only; edit/delete/reorder use atomic
 // pending predicates. No endpoint can mutate another conversation's inbox.
 func (s *Server) agentInboxAPI(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatMessageBytes)
 	scope := ""
 	if strings.Contains(r.URL.Path, "/tasks/") {
 		t := s.m.ResolveTask(r.PathValue("id"))
