@@ -685,6 +685,7 @@ export interface Activity {
 }
 
 export interface ContextUsage {
+  phase?: "before_compaction";
   used_tokens: number;
   window_tokens: number;
   input_budget: number;

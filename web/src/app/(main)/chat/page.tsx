@@ -1,4 +1,5 @@
 "use client";
+import { ScrollSession, listenForScrollInput } from "@/lib/scroll-session";
 import { ChatImagePreview, ImagePicker } from "@/components/chat-images";
 
 import * as React from "react";
@@ -667,6 +668,7 @@ function ChatView({
 
   // ---- transcript auto-scroll (open → bottom; stick to bottom unless scrolled up) ----
   const contentRef = React.useRef<HTMLDivElement | null>(null);
+  const scrollSessionRef = React.useRef(new ScrollSession());
   const atBottomRef = React.useRef(true);
   const viewport = React.useCallback(
     () => (contentRef.current?.closest('[data-slot="scroll-area-viewport"]') as HTMLElement | null) ?? null,
@@ -679,6 +681,7 @@ function ChatView({
     const vp = viewport();
     if (!vp) return;
     loadingMoreRef.current = true;
+    const scrollTicket = scrollSessionRef.current.ticket();
     const prevH = vp.scrollHeight;
     const prevTop = vp.scrollTop;
     try {
@@ -691,7 +694,8 @@ function ChatView({
       setHasMore(r.hasMore);
       requestAnimationFrame(() => {
         const v = viewport();
-        if (v) v.scrollTop = prevTop + (v.scrollHeight - prevH);
+        if (v && scrollSessionRef.current.isCurrent(scrollTicket) && !atBottomRef.current)
+          v.scrollTop = prevTop + (v.scrollHeight - prevH);
       });
     } catch {
       /* transient — a later scroll retries */
@@ -703,18 +707,23 @@ function ChatView({
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
-      if (approvalFocus.state && !focusHistory.ready) return;
+      if ((approvalFocus.state && !focusHistory.ready) || !scrollSessionRef.current.tracksScroll()) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
       if (vp.scrollTop <= 80) void loadEarlier(); // near top → pull an older page
     };
+    const removeInput = listenForScrollInput(vp, scrollSessionRef.current);
     vp.addEventListener("scroll", onScroll, { passive: true });
-    return () => vp.removeEventListener("scroll", onScroll);
+    return () => {
+      removeInput();
+      vp.removeEventListener("scroll", onScroll);
+    };
   }, [viewport, loadEarlier, approvalFocus.state, focusHistory.ready]);
   // open/switch a conversation → jump to the latest (bottom)
   // biome-ignore lint/correctness/useExhaustiveDependencies: changing conversations intentionally retriggers the scroll reset.
   React.useLayoutEffect(() => {
+    scrollSessionRef.current.select(String(conv.id));
     const vp = viewport();
-    if (vp) {
+    if (vp && !approvalFocus.state) {
       vp.scrollTop = vp.scrollHeight;
       atBottomRef.current = true;
     }
@@ -727,6 +736,18 @@ function ChatView({
     if (vp) vp.scrollTop = vp.scrollHeight;
   }, [messages, running, viewport, approvalFocus.state]);
 
+  React.useEffect(() => {
+    const el = contentRef.current;
+    if (!el || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (!approvalFocus.state && atBottomRef.current) {
+        const vp = viewport();
+        if (vp) vp.scrollTop = vp.scrollHeight;
+      }
+    });
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [conv.id, viewport, approvalFocus.state]);
   // Full-conversation totals come from the backend, not the loaded transcript
   // window (opening a long chat loads only its latest 200 activities). Keep the
   // local calculation only for older servers and the mock preview.

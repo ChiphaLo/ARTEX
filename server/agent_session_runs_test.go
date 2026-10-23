@@ -402,3 +402,34 @@ func TestDeferredPlannerRoundPreservesConcreteTriggers(t *testing.T) {
 		t.Fatal("lost deferred event", retained)
 	}
 }
+
+func TestPlannerHumanResumeDoesNotReplayIndependentAuditRounds(t *testing.T) {
+	s, task, p := interactiveFixture(t)
+	tx := transcript.NewStore(filepath.Join(s.m.dir, "transcripts"))
+	sessionID := fmt.Sprintf("exp%d-planner", task.ExpID)
+	for range 106 {
+		w := tx.NewWriter(sessionID, "")
+		w.RecordMessage(llm.UserText(strings.Repeat("old independent planner audit ", 300)), llm.Usage{})
+	}
+	w := tx.NewWriter(sessionID, "")
+	w.RecordMessage(llm.UserText("latest independent planner round"), llm.Usage{})
+	response := interactiveRequest(s, task, 0, "planner", "messages", map[string]any{"message": "continue fixture"})
+	if response.Code != 202 {
+		t.Fatal(response.Code, response.Body.String())
+	}
+	select {
+	case <-p.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("planner not started")
+	}
+	p.mu.Lock()
+	req := p.requests[0]
+	p.mu.Unlock()
+	for _, m := range req.Messages {
+		if strings.Contains(m.Text(), "old independent planner audit") {
+			t.Fatal("old rounds injected")
+		}
+	}
+	close(p.release)
+	waitInteractiveRun(t, s, plannerScope(task.ID), "completed")
+}

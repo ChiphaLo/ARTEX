@@ -1,4 +1,5 @@
 "use client";
+import { ScrollSession, listenForScrollInput } from "@/lib/scroll-session";
 import { ChatImagePreview, ImagePicker } from "@/components/chat-images";
 
 import * as React from "react";
@@ -658,6 +659,8 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const snapshotRef = React.useRef(0); // task-level snapshot cursor → SSE since=
   const esRef = React.useRef<EventSource | null>(null);
   const activeKeyRef = React.useRef(mainSessionKey(0)); // current session key (for SSE dispatch/unread)
+  const scrollSessionRef = React.useRef(new ScrollSession());
+  const olderLoadsRef = React.useRef(new Set<string>());
   const atBottomRef = React.useRef(true); // transcript pinned to bottom?
   const llmToastSeqRef = React.useRef<Set<number>>(new Set());
   const chatStatusRequestRef = React.useRef(0);
@@ -685,7 +688,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       loadingKeysRef.current.add(key);
       const token = (reqTokenRef.current[key] ?? 0) + 1;
       reqTokenRef.current[key] = token;
-      patchStore(key, (s) => ({ ...s, loading: true, error: undefined }));
+      patchStore(key, (s) => ({ ...s, loading: true, loadingMore: false, error: undefined }));
 
       if (key === "system") {
         void (async () => {
@@ -736,7 +739,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           if (reqTokenRef.current[key] !== token) return; // superseded
           if (r.snapshotCursor > snapshotRef.current) snapshotRef.current = r.snapshotCursor;
           patchStore(key, (s) => {
-            const items = mergeBySeq(r.items, s.items); // keep any live frames arrived meanwhile
+            const items = mergeBySeq(s.items, r.items); // latest server rows refresh cached metadata; newer SSE IDs remain
             return {
               ...s,
               items,
@@ -762,7 +765,11 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   const loadEarlier = React.useCallback(
     (key: string, viewport: () => HTMLElement | null) => {
       const st = store[key];
-      if (!st || st.loadingMore || !st.hasMore || !st.earliestSeq) return;
+      if (!st || st.loading || st.loadingMore || !st.hasMore || !st.earliestSeq || olderLoadsRef.current.has(key))
+        return;
+      olderLoadsRef.current.add(key);
+      const scrollTicket = scrollSessionRef.current.ticket();
+      const latestToken = reqTokenRef.current[key] ?? 0;
       const vp = viewport();
       const prevH = vp?.scrollHeight ?? 0;
       const prevTop = vp?.scrollTop ?? 0;
@@ -770,6 +777,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       api
         .activityHistory(taskId, key, st.earliestSeq, PAGE)
         .then((r) => {
+          if ((reqTokenRef.current[key] ?? 0) !== latestToken) return;
           patchStore(key, (s) => {
             const items = mergeBySeq(r.items, s.items);
             return {
@@ -782,12 +790,14 @@ export function SessionsTab({ taskId }: { taskId: string }) {
           });
           requestAnimationFrame(() => {
             const v = viewport();
-            if (v) v.scrollTop = prevTop + (v.scrollHeight - prevH);
+            if (v && scrollSessionRef.current.isCurrent(scrollTicket) && !atBottomRef.current)
+              v.scrollTop = prevTop + (v.scrollHeight - prevH);
           });
         })
         .catch(() => {
           patchStore(key, (s) => ({ ...s, loadingMore: false }));
-        });
+        })
+        .finally(() => olderLoadsRef.current.delete(key));
     },
     [taskId, store, patchStore],
   );
@@ -1326,7 +1336,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   React.useEffect(() => {
     activeKeyRef.current = activeKey;
     const st = store[activeKey];
-    if (!st || (!st.loaded && !st.loading)) {
+    if (!approvalFocus.state || !st || (!st.loaded && !st.loading)) {
       loadSession(activeKey);
     } else if (st.unread) {
       patchStore(activeKey, (s) => ({ ...s, unread: 0 }));
@@ -1473,22 +1483,28 @@ export function SessionsTab({ taskId }: { taskId: string }) {
     const vp = viewport();
     if (!vp) return;
     const onScroll = () => {
-      if (approvalFocus.state && !focusHistory.ready) return;
+      if ((approvalFocus.state && !focusHistory.ready) || !scrollSessionRef.current.tracksScroll()) return;
       atBottomRef.current = vp.scrollTop + vp.clientHeight >= vp.scrollHeight - 60;
       if (vp.scrollTop <= 80) loadEarlier(activeKeyRef.current, viewport); // near top → older page
     };
+    const removeInput = listenForScrollInput(vp, scrollSessionRef.current);
     vp.addEventListener("scroll", onScroll, { passive: true });
-    return () => vp.removeEventListener("scroll", onScroll);
+    return () => {
+      removeInput();
+      vp.removeEventListener("scroll", onScroll);
+    };
   }, [viewport, activeId, loadEarlier, approvalFocus.state, focusHistory.ready]);
   // open/switch a session → jump to the latest (bottom)
   // biome-ignore lint/correctness/useExhaustiveDependencies: activeId intentionally scrolls a newly selected session.
   React.useLayoutEffect(() => {
+    scrollSessionRef.current.select(activeKey);
+    activeKeyRef.current = activeKey;
     const vp = viewport();
     if (vp && !approvalFocus.state) {
       vp.scrollTop = vp.scrollHeight;
       atBottomRef.current = true;
     }
-  }, [activeId, viewport, approvalFocus.state]);
+  }, [activeId, activeKey, viewport, approvalFocus.state]);
   // new activity → stick to bottom only if the user is already pinned there
   // biome-ignore lint/correctness/useExhaustiveDependencies: activity growth intentionally drives live-edge scrolling.
   React.useLayoutEffect(() => {
@@ -1598,7 +1614,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
   // 发送键位由系统设置决定（localStorage），默认 Enter 发送。
   const sendMode = useChatSendMode();
   // What the transcript pane should show for the active session.
-  const showLoader = !activeState || (activeState.loading && !activeState.loaded);
+  const showLoader = !activeState || activeState.loading;
   const resolutionForSession = (session: Session): TaskLLMResolution | undefined => {
     if (!llmResolutions || session.inherited || session.role === "system") return undefined;
     if (session.role === "mainagent") return llmResolutions.mainagent;

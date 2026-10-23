@@ -14,12 +14,13 @@ const contextBytesPerToken = llm.RequestBytesPerToken
 var ErrContextWindow = errors.New("prompt is too long for the configured context window")
 
 type ContextUsage struct {
-	UsedTokens      int  `json:"used_tokens"`
-	WindowTokens    int  `json:"window_tokens"`
-	InputBudget     int  `json:"input_budget"`
-	ReservedTokens  int  `json:"reserved_tokens"`
-	TrimmedMessages int  `json:"trimmed_messages"`
-	Estimated       bool `json:"estimated"`
+	Phase           string `json:"phase,omitempty"` // before_compaction snapshots must replace stale prior requests
+	UsedTokens      int    `json:"used_tokens"`
+	WindowTokens    int    `json:"window_tokens"`
+	InputBudget     int    `json:"input_budget"`
+	ReservedTokens  int    `json:"reserved_tokens"`
+	TrimmedMessages int    `json:"trimmed_messages"`
+	Estimated       bool   `json:"estimated"`
 }
 
 type contextGroup struct {

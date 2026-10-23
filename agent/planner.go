@@ -502,7 +502,7 @@ func (p *Planner) plan(ctx context.Context, taskID int64, as *db.AssetStore, ts 
 	session := agentcore.NewSession(opts)
 	defer session.Close()
 	if (resume || message != "") && p.tx != nil {
-		if e := session.Resume(opts.SessionID); e != nil && resume {
+		if e := session.ResumeLatestRun(opts.SessionID); e != nil && resume {
 			return false, "", e
 		}
 		if resume && len(session.Messages()) == 0 {

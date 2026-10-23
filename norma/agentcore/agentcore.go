@@ -377,7 +377,12 @@ func (s *Session) UnlockSet() *tool.UnlockSet { return s.unlock }
 // Resume reloads a prior conversation from the transcript store, rebuilding the
 // message history and cumulative usage so the next Prompt continues it. Requires
 // Options.Transcript to be set. Subsequent messages append to the same file.
-func (s *Session) Resume(sessionID string) error {
+func (s *Session) Resume(sessionID string) error { return s.resume(sessionID, false) }
+
+// ResumeLatestRun restores only the last independently started execution in an
+// audit file shared by fresh scheduled rounds. Normal continuous chats use Resume.
+func (s *Session) ResumeLatestRun(sessionID string) error { return s.resume(sessionID, true) }
+func (s *Session) resume(sessionID string, latestRun bool) error {
 	if s.store == nil {
 		return errors.New("agentcore: Resume requires Options.Transcript")
 	}
@@ -385,7 +390,11 @@ func (s *Session) Resume(sessionID string) error {
 	if err != nil {
 		return err
 	}
-	msgs, usage := transcript.Messages(recs)
+	selected := recs
+	if latestRun {
+		selected = transcript.LatestRunRecords(recs)
+	}
+	msgs, usage := transcript.Messages(selected)
 	s.messages = cleanResumed(msgs)
 	s.usage = usage
 	s.sessionID = sessionID

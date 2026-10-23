@@ -944,6 +944,15 @@ func (l *loop) streamAndExecute(schemas []llm.ToolSchema) (asst llm.Message, exe
 				err = fmt.Errorf("%w: cannot size request: %v", ErrContextWindow, sizeErr)
 				return
 			}
+			// Publish the pending input BEFORE a potentially lengthy summary. If
+			// cancelled during compaction the UI must not retain the old small request.
+			if before.UsedTokens+before.ReservedTokens >= l.in.ContextWindow*90/100 {
+				before.Phase = "before_compaction"
+				if !l.emit(Event{Kind: KindContextUsage, Context: &before}) {
+					consumerStopped = true
+					return
+				}
+			}
 			l.messages = c.PreRequest(l.ctx, l.messages, before.UsedTokens, before.ReservedTokens)
 			if l.ctx.Err() != nil {
 				err = l.ctx.Err()

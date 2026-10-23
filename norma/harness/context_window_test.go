@@ -233,3 +233,34 @@ func TestContextWindowFailureDoesNotCallProviderOrRetry(t *testing.T) {
 		t.Fatal(m.calls, contexts, retries, terminal)
 	}
 }
+
+func TestCompactionPublishesPendingContextBeforeSummaryStarts(t *testing.T) {
+	beforeSeen, summaryCalled := false, false
+	c := compaction.New(compaction.Config{ContextWindow: 10000, RequestThresholdPercent: 90}, func(_ context.Context, _ []llm.Message) (string, error) {
+		summaryCalled = true
+		if !beforeSeen {
+			t.Fatal("UI kept old request until after compaction")
+		}
+		return "small digest", nil
+	})
+	m := &scriptedModel{turns: [][]llm.StreamEvent{textTurn("done")}}
+	in := QueryInput{Messages: []llm.Message{llm.UserText(strings.Repeat("old", 10000)), llm.UserText("latest human request")}, Tools: tool.NewRegistry(), MaxTokens: 1000, ContextWindow: 10000, Compactor: c}
+	var last *ContextUsage
+	for ev, err := range Query(t.Context(), in, QueryDeps{CallModel: m.call}) {
+		if err != nil {
+			t.Fatal(err)
+		}
+		if ev.Context != nil {
+			last = ev.Context
+			if last.Phase == "before_compaction" {
+				beforeSeen = true
+				if last.UsedTokens+last.ReservedTokens < 9000 {
+					t.Fatal(last)
+				}
+			}
+		}
+	}
+	if !summaryCalled || last == nil || last.Phase != "" || last.UsedTokens+last.ReservedTokens >= 9000 {
+		t.Fatal(summaryCalled, last)
+	}
+}
