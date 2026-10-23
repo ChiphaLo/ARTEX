@@ -70,8 +70,13 @@ function taskProfileIDs(task: Task): string[] {
   return task.llm_profile_id ? [String(task.llm_profile_id)] : [];
 }
 
-function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: LLMProfile[]; onUpdated: () => void }) {
-  const [open, setOpen] = React.useState(false);
+function TaskLLMControl({ task, profiles, onUpdated, open, setOpen }: {
+  task: Task;
+  profiles: LLMProfile[];
+  onUpdated: () => void;
+  open: boolean;
+  setOpen: (open: boolean) => void;
+}) {
   const [profileIDs, setProfileIDs] = React.useState<string[]>(() => taskProfileIDs(task));
   const [models, setModels] = React.useState<Record<string, string>>(() => ({ ...task.llm_models }));
   const [activeProfileID, setActiveProfileID] = React.useState(
@@ -113,10 +118,13 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
     setActiveProfileID(task.active_llm_profile_id ? String(task.active_llm_profile_id) : (next[0] ?? ""));
   }, [task]);
 
-  const handleOpenChange = (next: boolean) => {
-    setOpen(next);
-    if (next) syncDraft();
-  };
+  // The session's model button opens this same editor, not a second draft.
+  // Poll updates must not overwrite edits while it remains open.
+  const wasOpen = React.useRef(false);
+  React.useEffect(() => {
+    if (open && !wasOpen.current) syncDraft();
+    wasOpen.current = open;
+  }, [open, syncDraft]);
 
   const handleProfileIDsChange = (next: string[]) => {
     setProfileIDs(next);
@@ -151,20 +159,21 @@ function TaskLLMControl({ task, profiles, onUpdated }: { task: Task; profiles: L
   };
 
   return (
-    <Popover open={open} onOpenChange={handleOpenChange}>
+    <Popover open={open} onOpenChange={setOpen}>
       <PopoverTrigger asChild>
         <Button
           size="sm"
           variant={exhausted ? "destructive" : "outline"}
-          aria-label="查看或切换任务 LLM 配置"
+          aria-label="切换任务模型"
           title={currentTitle}
         >
           <BrainIcon data-icon="inline-start" />
+          <span className="lg:hidden">模型</span>
           <span className="hidden max-w-36 truncate lg:inline">{currentLabel}</span>
           {backupCount > 0 && <span className="hidden text-muted-foreground xl:inline">+{backupCount}</span>}
         </Button>
       </PopoverTrigger>
-      <PopoverContent ref={popoverContentRef} align="start" className="w-[min(28rem,calc(100vw-2rem))] gap-4 p-4">
+      <PopoverContent ref={popoverContentRef} align="start" collisionPadding={8} className="max-h-[var(--radix-popover-content-available-height)] w-[min(28rem,calc(100vw-2rem))] gap-4 overflow-y-auto p-4">
         <PopoverHeader>
           <PopoverTitle>任务 LLM 配置链</PopoverTitle>
           <PopoverDescription>{editorDescription}</PopoverDescription>
@@ -217,6 +226,8 @@ function TaskDetailInner() {
   const [tab, setTab] = React.useState("sessions");
   const [interceptPendingCount, setInterceptPendingCount] = React.useState(0);
   const [profiles, setProfiles] = React.useState<LLMProfile[]>([]);
+  const [modelEditorOpen, setModelEditorOpen] = React.useState(false);
+  const [modelRevision, setModelRevision] = React.useState(0);
   const [archiving, setArchiving] = React.useState(false);
 
   React.useEffect(() => {
@@ -370,7 +381,7 @@ function TaskDetailInner() {
             {task.id}
           </code>
           <Separator orientation="vertical" className="mx-1 hidden h-4 sm:block" />
-          <TaskLLMControl task={task} profiles={profiles} onUpdated={load} />
+          <TaskLLMControl key={task.id} task={task} profiles={profiles} onUpdated={() => { load(); setModelRevision((value) => value + 1); }} open={modelEditorOpen} setOpen={setModelEditorOpen} />
           <StatusBadge domain={terminal ? "task" : "engine"} value={terminal ? task.status : engineMode} dot />
           {canArchive ? (
             <AlertDialog>
@@ -423,7 +434,7 @@ function TaskDetailInner() {
       {/* Tab content */}
       <div className="flex-1 p-4 lg:p-6">
         <TabsContent value="sessions" className="mt-0">
-          <SessionsTab taskId={id} />
+          <SessionsTab taskId={id} modelRevision={modelRevision} onOpenModelSettings={() => setModelEditorOpen(true)} />
         </TabsContent>
         <TabsContent value="overview" className="mt-0">
           <OverviewTab taskId={id} />

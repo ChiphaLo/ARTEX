@@ -834,7 +834,8 @@ function mockRoleResolution(task: Task, agentKey: "mainagent" | "planner" | "wor
         reason: "任务 LLM 配置链额度已耗尽",
       };
     }
-    return mockProfileResolution(task.active_llm_profile_id, "task_chain");
+    const resolved = mockProfileResolution(task.active_llm_profile_id, "task_chain");
+    return { ...resolved, model: task.llm_models?.[String(task.active_llm_profile_id)] || resolved.model };
   }
   const globalProfile = D.llmProfiles.find((item) => item.is_default);
   if (globalProfile) return mockProfileResolution(Number(globalProfile.id), "global_profile");
@@ -1417,16 +1418,20 @@ function route(m: string, path: string, seg: string[], q: URLSearchParams, b: Re
     const ids = [...((b.llm_profile_ids as number[] | undefined) ?? [])];
     const activeID = typeof b.active_llm_profile_id === "number" ? b.active_llm_profile_id : ids[0];
     const target = mockTasks.find((item) => item.id === seg[1]);
+    const requestedModels = b.llm_models as Record<string, string> | undefined;
+    const models = Object.fromEntries(Object.entries(requestedModels ?? target?.llm_models ?? {}).filter(([id]) => ids.includes(Number(id))));
     if (target) {
       target.llm_profile_ids = ids;
       target.llm_profile_id = ids[0];
       target.active_llm_profile_id = activeID;
+      target.llm_models = models;
       target.llm_failover_state = ids.length ? "ready" : "default";
       target.llm_failover_reason = undefined;
     }
     return {
       id: seg[1],
       llm_profile_ids: ids,
+      llm_models: models,
       active_llm_profile_id: activeID,
       llm_failover_state: ids.length ? "ready" : "default",
       reopened_intents: 0,

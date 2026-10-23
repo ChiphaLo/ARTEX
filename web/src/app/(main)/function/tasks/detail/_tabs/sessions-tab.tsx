@@ -33,6 +33,7 @@ import { AgentInbox, useInboxRequestID } from "@/components/agent-inbox";
 import { AgentContinueButton, PlannerComposer } from "@/components/agent-run-controls";
 import { ApprovalExecutionFocus, useApprovalFocus, useApprovalHistory } from "@/components/approval-execution-focus";
 import { ContextWindowIndicator } from "@/components/context-window-indicator";
+import { SessionModelControl } from "@/components/session-model-control";
 import { MentionTextarea } from "@/components/mention-textarea";
 import { SideQuestionButton, SideQuestionWorkspace } from "@/components/side-question-workspace";
 import { TodoPopover } from "@/components/todo-popover";
@@ -76,13 +77,6 @@ import type {
   TokenTotal,
 } from "@/lib/types";
 import { cn } from "@/lib/utils";
-
-// resolutionLabel names the LLM a session runs on. The badge shows this alone and
-// keeps the model id in its tooltip. Env-backed configs can arrive without a name,
-// so fall back to the model id rather than rendering an empty badge.
-function resolutionLabel(r: TaskLLMResolution): string {
-  return r.name || r.model || "未命名配置";
-}
 
 // fmtBytes renders a human file size for attachment chips (mirrors transcript.tsx).
 function fmtBytes(n: number): string {
@@ -487,7 +481,11 @@ function WorkerAssetBadge({ assets }: { assets: IntentAsset[] }) {
   );
 }
 
-export function SessionsTab({ taskId }: { taskId: string }) {
+export function SessionsTab({ taskId, modelRevision = 0, onOpenModelSettings }: {
+  taskId: string;
+  modelRevision?: number;
+  onOpenModelSettings?: () => void;
+}) {
   const approvalFocus = useApprovalFocus({ taskId });
   const [selectedSessionId, setActiveId] = React.useState(MAIN_ID);
   const focusSession = React.useMemo<Session | undefined>(() => {
@@ -867,7 +865,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
       alive = false;
       clearInterval(timer);
     };
-  }, [taskId]);
+  }, [taskId, modelRevision]);
 
   React.useEffect(() => {
     let alive = true;
@@ -1822,26 +1820,7 @@ export function SessionsTab({ taskId }: { taskId: string }) {
               <SideQuestionButton side={side} />
               <ContextWindowIndicator activity={activity} />
               {activeResolution && (
-                <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Badge
-                      variant="outline"
-                      className="max-w-28 shrink-0 font-normal"
-                      aria-label={
-                        activeResolution.available ? `当前配置：${resolutionLabel(activeResolution)}` : "模型不可用"
-                      }
-                    >
-                      <span className="truncate">
-                        {activeResolution.available ? resolutionLabel(activeResolution) : "模型不可用"}
-                      </span>
-                    </Badge>
-                  </TooltipTrigger>
-                  <TooltipContent side="bottom" className="max-w-xs [overflow-wrap:anywhere]">
-                    {activeResolution.available
-                      ? [resolutionLabel(activeResolution), activeResolution.model].filter(Boolean).join(" / ")
-                      : activeResolution.reason || "没有可用的 LLM 配置"}
-                  </TooltipContent>
-                </Tooltip>
+                <SessionModelControl resolution={activeResolution} onEdit={active.inherited ? undefined : onOpenModelSettings} />
               )}
               {activeAssets && activeAssets.length > 0 && <WorkerAssetBadge assets={activeAssets} />}
               {active.inherited && active.source_task_id && (

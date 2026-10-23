@@ -40,11 +40,14 @@ test("provider switch invalidates old capacity; bad data does not show false zer
   assert.equal(contextTokens(283000), "283K");
   assert.equal(contextTokens(1048576), "1.05M");
 });
-test("indicator renders only an accessible circle while tooltip is closed", () => {
+test("indicator renders only an accessible circle while click/tap popover is closed", () => {
   const { ContextWindowIndicator } = load("components/context-window-indicator");
   const html = renderToString(React.createElement(ContextWindowIndicator, { activity: [event(1)] }));
   assert.match(html, /<button/);
   assert.match(html, /aria-label="上下文用量"/);
+  assert.match(html, /aria-haspopup="dialog"/);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /pointer:coarse/);
   assert.match(html, /stroke-dasharray="65 100"/);
   assert.doesNotMatch(html, /283K|308K|475K|65%|非累计消耗|自动压缩/);
 });
