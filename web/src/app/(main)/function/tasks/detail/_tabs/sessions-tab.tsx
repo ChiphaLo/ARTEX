@@ -56,7 +56,8 @@ import { Spinner } from "@/components/ui/spinner";
 import { Textarea } from "@/components/ui/textarea";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 import { useSideQuestions } from "@/hooks/use-side-questions";
-import { type ActivityUnreadState, advanceActivityUnread } from "@/lib/activity-stream";
+import { createActivityBatcher } from "@/lib/activity-batcher";
+import { applySessionActivityBatch, emptySessionState as emptyState, type SessionState } from "@/lib/session-activity";
 import type { AgentMessageMode } from "@/lib/api";
 import { api, sseUrl } from "@/lib/api";
 import { shouldSubmitOnKey, useChatSendMode } from "@/lib/chat-send-mode";
@@ -115,31 +116,7 @@ function workerMessageCharCount(value: string): number {
 // One session's lazily-loaded, reverse-paginated cache. `lastTs`/`unread` are kept
 // live even for sessions that were never opened, so the list shows liveness + unread
 // without holding their full history.
-type SessionState = ActivityUnreadState & {
-  items: Activity[];
-  loaded: boolean;
-  loading: boolean;
-  loadingMore: boolean;
-  hasMore: boolean; // older history remains above the loaded window
-  earliestSeq: number; // earliest loaded id — reverse-pagination anchor
-  lastTs: string; // most-recent activity time (drives live badge; updated even when unloaded)
-  error?: string;
-};
 type SessionStore = Record<string, SessionState>;
-
-function emptyState(): SessionState {
-  return {
-    items: [],
-    loaded: false,
-    loading: false,
-    loadingMore: false,
-    hasMore: false,
-    earliestSeq: 0,
-    unread: 0,
-    unreadSeq: 0,
-    lastTs: "",
-  };
-}
 
 // sessionKeyOf routes an activity to its stable session key. worker="planner" covers
 // BOTH the Goal Agent's round-0 decomposition and the Planner (single Plan session).
@@ -922,6 +899,8 @@ export function SessionsTab({ taskId, modelRevision = 0, onOpenModelSettings }: 
     loadingKeysRef.current = new Set([mainSessionKey(0)]);
     let alive = true;
 
+    let disposeBatch = () => {};
+
     // MOCK demo: no SSE backend — pull one activity snapshot and bucket by session.
     if (MOCK) {
       api
@@ -999,6 +978,29 @@ export function SessionsTab({ taskId, modelRevision = 0, onOpenModelSettings }: 
         esRef.current = es;
         es.onopen = () => setSseLive(true);
         es.onerror = () => setSseLive(false); // EventSource auto-reconnects; DB compensates the gap
+        const batcher = createActivityBatcher<Activity>((frames) => {
+          if (!alive) return;
+          const buckets = new Map<string, Activity[]>();
+          for (const frame of frames) {
+            const key = sessionKeyOf(frame);
+            const bucket = buckets.get(key) ?? [];
+            bucket.push(frame);
+            buckets.set(key, bucket);
+          }
+          setStore((prev) => {
+            if (!alive) return prev;
+            const next = { ...prev };
+            const activeK = activeKeyRef.current;
+            for (const [key, items] of buckets) {
+              next[key] = applySessionActivityBatch(
+                prev[key] ?? emptyState(), items, key === activeK,
+                key !== activeK || atBottomRef.current, MAX_KEEP,
+              );
+            }
+            return next;
+          });
+        }, () => document.hidden ? 1000 : 100);
+        disposeBatch = () => batcher.dispose();
         es.onmessage = (e) => {
           let a: Activity;
           try {
@@ -1025,38 +1027,7 @@ export function SessionsTab({ taskId, modelRevision = 0, onOpenModelSettings }: 
                 // The periodic resolver poll will retry if this event-triggered refresh fails.
               });
           }
-          const k = sessionKeyOf(a);
-          setStore((prev) => {
-            const cur = prev[k] ?? emptyState();
-            const activeK = activeKeyRef.current;
-            const unreadState = advanceActivityUnread(cur, a, k === activeK);
-            // Merge into sessions that are loaded, actively loading, or the current
-            // view (so returning is instant + a frame that lands mid-load isn't lost).
-            // A cold, inactive session also keeps a tiny accounting tail so the
-            // sidebar can add the latest unfinished usage without loading history.
-            if (!cur.loaded && !cur.loading && k !== activeK) {
-              const accountingItems =
-                a.kind === "usage" || a.kind === "result" || a.kind === "context_usage"
-                  ? mergeBySeq(cur.items, [a]).slice(-4)
-                  : cur.items;
-              return {
-                ...prev,
-                [k]: { ...cur, items: accountingItems, lastTs: a.ts, ...unreadState },
-              };
-            }
-            let items = mergeBySeq(cur.items, [a]);
-            // Memory bound: trim oldest when over cap (older re-fetched on scroll-up),
-            // but never while the user is reading this session's history (scrolled up).
-            let hasMore = cur.hasMore;
-            let earliestSeq = cur.earliestSeq;
-            const trimmable = k !== activeK || atBottomRef.current;
-            if (trimmable && items.length > MAX_KEEP) {
-              items = items.slice(items.length - MAX_KEEP);
-              hasMore = true;
-              earliestSeq = items[0].seq;
-            }
-            return { ...prev, [k]: { ...cur, items, lastTs: a.ts, ...unreadState, hasMore, earliestSeq } };
-          });
+          batcher.push(a);
         };
       })
       .catch((err) => {
@@ -1068,6 +1039,7 @@ export function SessionsTab({ taskId, modelRevision = 0, onOpenModelSettings }: 
 
     return () => {
       alive = false;
+      disposeBatch();
       esRef.current?.close();
       esRef.current = null;
     };

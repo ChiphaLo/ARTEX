@@ -20,8 +20,9 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { api } from "@/lib/api";
-import { coalesceThinking } from "@/lib/activity-stream";
+import { ThinkingProjection } from "@/lib/activity-stream";
 import { Markdown } from "@/components/markdown";
+import { PagedText } from "@/components/paged-text";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
@@ -85,7 +86,7 @@ type Group =
 function groupSteps(steps: Activity[], chat: boolean): Group[] {
   const out: Group[] = [];
   const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
-  for (const s of coalesceThinking(steps)) {
+  for (const s of steps) {
     if (s.kind === "usage" || s.kind === "context_usage" || s.kind === "model_status") continue; // usage markers are not messages
     if (s.kind === "round") {
       out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
@@ -393,7 +394,12 @@ function ToolBlock({
   // key over the seqs we'd load; changes when the result (or command) arrives.
   const detailKey = `${use?.seq ?? ""}:${result?.seq ?? ""}`;
   React.useEffect(() => {
-    if (!open || loadedKey.current === detailKey) return;
+    if (!open) {
+      loadedKey.current = null;
+      setDetail(null); // Do not retain fetched multi-megabyte bodies after collapse.
+      return;
+    }
+    if (loadedKey.current === detailKey) return;
     let live = true;
     const segs: { label: string; seq: number }[] = [];
     if (use) segs.push({ label: "命令", seq: use.seq });
@@ -475,11 +481,7 @@ function ToolBlock({
         {cmd && <span className="min-w-0 flex-1 truncate font-mono text-muted-foreground">{cmd}</span>}
         <span className={"ml-auto shrink-0 font-medium " + statusTone}>{statusText}</span>
       </button>
-      {open && (
-        <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
-          {detail ?? "加载中…"}
-        </pre>
-      )}
+      {open && <PagedText text={detail ?? "加载中…"} />}
     </section>
   );
 }
@@ -509,7 +511,12 @@ function MessageBlock({
 
   const detailKey = group.steps.map((s) => s.seq).join(",");
   React.useEffect(() => {
-    if (!open || loadedKey.current === detailKey) return;
+    if (!open) {
+      loadedKey.current = null;
+      setDetail(null);
+      return;
+    }
+    if (loadedKey.current === detailKey) return;
     let live = true;
     void Promise.all(
       group.steps.map((s) =>
@@ -542,11 +549,7 @@ function MessageBlock({
           {hasThinking && <span className="ml-1 text-[10px] text-muted-foreground">· 含推理</span>}
         </span>
       </button>
-      {open && (
-        <pre className="ml-7 mb-1 max-h-72 overflow-auto whitespace-pre-wrap break-all rounded bg-muted/50 p-2 font-mono text-[11px] leading-relaxed">
-          {detail ?? "加载中…"}
-        </pre>
-      )}
+      {open && <PagedText text={detail ?? "加载中…"} followTail />}
     </div>
   );
 }
@@ -687,6 +690,16 @@ function AnswerBlock({ step, getDetail }: { step: Activity; getDetail: (seq: num
   );
 }
 
+const MemoUserRow = React.memo(UserRow);
+const MemoAnswerBlock = React.memo(AnswerBlock);
+const MemoInterceptCard = React.memo(InterceptCard);
+const MemoToolBlock = React.memo(ToolBlock, (a, b) =>
+  a.getDetail === b.getDetail && a.showWorker === b.showWorker && a.focused === b.focused &&
+  a.group.worker === b.group.worker && a.group.use === b.group.use && a.group.result === b.group.result);
+const MemoMessageBlock = React.memo(MessageBlock, (a, b) =>
+  a.getDetail === b.getDetail && a.showWorker === b.showWorker && a.group.worker === b.group.worker &&
+  a.group.steps.length === b.group.steps.length && a.group.steps.every((step, i) => step === b.group.steps[i]));
+
 // ExecView renders an agent execution replay (planner / worker / main agent) in
 // the compact, grouped, expand-to-detail format — thinking, tool calls/results,
 // and (for the main agent) the human turns. Worker lane chips show only when the
@@ -755,8 +768,12 @@ function ExecView({
     }
     setMenu(null);
   }
-  const visible = activity.filter((a) => !a.metadata?.context_excluded && !hidden.has(a.seq));
-  const showWorker = new Set(activity.map((a) => a.worker)).size > 1;
+  const visible = React.useMemo(() => activity.filter((a) => !a.metadata?.context_excluded && !hidden.has(a.seq)), [activity, hidden]);
+  const projection = React.useRef<ThinkingProjection | null>(null);
+  if (!projection.current) projection.current = new ThinkingProjection();
+  const steps = React.useMemo(() => projection.current!.project(visible), [visible]);
+  const groups = React.useMemo(() => groupSteps(steps, !!chat), [steps, chat]);
+  const showWorker = React.useMemo(() => new Set(activity.map((a) => a.worker)).size > 1, [activity]);
   // default detail fetcher: the task-scoped activity endpoint. The chat page passes
   // its own (conversation-scoped) fetcher instead.
   const getDetail = React.useCallback(
@@ -765,7 +782,7 @@ function ExecView({
   );
   return (
     <div className="flex flex-col">
-      {groupSteps(visible, !!chat).map((g) => (
+      {groups.map((g) => (
         // biome-ignore lint/a11y/noStaticElementInteractions: this wrapper adds an optional context menu; existing child controls retain their keyboard semantics.
         <div
           key={`${g.type}-${g.key}`}
@@ -800,11 +817,11 @@ function ExecView({
               <span className="h-px flex-1 bg-border" />
             </div>
           ) : g.type === "user" ? (
-            <UserRow key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
+            <MemoUserRow key={"u" + g.key} step={g.step} intent={g.intent} getDetail={getDetail} />
           ) : g.type === "answer" ? (
-            <AnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
+            <MemoAnswerBlock key={"a" + g.key} step={g.step} getDetail={getDetail} />
           ) : g.type === "tool" ? (
-            <ToolBlock
+            <MemoToolBlock
               key={"t" + g.key}
               group={g}
               getDetail={getDetail}
@@ -812,9 +829,9 @@ function ExecView({
               focused={focusedSeq != null && g.use?.seq === focusedSeq}
             />
           ) : g.type === "intercept" ? (
-            <InterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
+            <MemoInterceptCard key={"ic" + g.key} step={g.step} getDetail={getDetail} />
           ) : (
-            <MessageBlock key={"m" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
+            <MemoMessageBlock key={"m" + g.key} group={g} getDetail={getDetail} showWorker={showWorker} />
           )}
         </div>
       ))}

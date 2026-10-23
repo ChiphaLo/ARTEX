@@ -11,7 +11,7 @@ const js = ts.transpileModule(fs.readFileSync(file, "utf8"), {
   compilerOptions: { module: ts.ModuleKind.CommonJS },
 }).outputText;
 vm.runInThisContext(`(function(module,exports){${js}\n})`, { filename: file })(mod, mod.exports);
-const { coalesceThinking, advanceActivityUnread } = mod.exports;
+const { coalesceThinking, advanceActivityUnread, ThinkingProjection } = mod.exports;
 const delta = (seq, id, text) => ({ seq, kind: "thinking", metadata: { stream_id: id, stream_delta: text } });
 
 test("context usage updates cursor but is not an unread response", () => {
@@ -113,7 +113,47 @@ test("live session dispatcher uses filtered accounting in both cache branches", 
     path.join(__dirname, "../src/app/(main)/function/tasks/detail/_tabs/sessions-tab.tsx"),
     "utf8",
   );
-  assert.match(page, /const unreadState = advanceActivityUnread\(cur, a, k === activeK\)/);
-  assert.equal((page.match(/\.\.\.unreadState/g) ?? []).length, 2);
+  assert.match(page, /createActivityBatcher<Activity>/);
+  assert.match(page, /applySessionActivityBatch\(/);
+  assert.match(page, /disposeBatch\(\)/);
   assert.doesNotMatch(page, /cur\.unread\s*\+\s*1/, "per-frame counters reintroduced");
+});
+
+test("append projection reuses completed rows without mutating published snapshots", () => {
+  const projection = new ThinkingProjection();
+  const first = Object.freeze({ ...delta(1, "a", "first"), summary: "first" });
+  const history = [first, { seq: 2, kind: "result", summary: "done" }];
+  const before = projection.project(history);
+  const after = projection.project([...history, delta(3, "a", " second")]);
+  assert.equal(before[0].detail, "first");
+  assert.equal(after[0].detail, "first second");
+  assert.equal(after[1], before[1]);
+  assert.notEqual(after[0], before[0]);
+  assert.equal(projection.project(history)[0].detail, "first", "abandoned concurrent render must be reversible");
+});
+
+test("prepend, replacement and trimmed pages rebuild exactly; final detail remains authoritative", () => {
+  const projection = new ThinkingProjection();
+  const a = delta(2, "a", "middle"), b = delta(3, "a", "tail");
+  projection.project([a, b]);
+  assert.equal(projection.project([delta(1,"a","head"),a,b])[0].detail,"headmiddletail");
+  assert.equal(projection.project([a,{...b, metadata:{stream_id:"a",stream_delta:"replacement"}}])[0].detail,"middlereplacement");
+  assert.equal(projection.project([b])[0].detail,"tail");
+  const final={seq:4,kind:"thinking",summary:"finished",metadata:{stream_id:"a",stream_done:true}};
+  const rows=projection.project([b,final]);
+  assert.equal(rows[0].detail,undefined);
+  assert.equal(rows[0].seq,4);
+});
+
+test("summary normalisation scans only new chunks and a bounded tail, not all prior text", () => {
+  const rows=Array.from({length:3000},(_,i)=>({...delta(i+1,"big",("synthetic line "+i+"\n").repeat(20)),summary:"start"}));
+  let scanned=0;
+  const original=String.prototype.replace;
+  String.prototype.replace=function(...args){ scanned+=this.length;return original.apply(this,args); };
+  let merged;
+  try { merged=coalesceThinking(rows); } finally { String.prototype.replace=original; }
+  const full=rows.map(r=>r.metadata.stream_delta).join("");
+  assert.equal(merged[0].detail,full);
+  assert.equal(merged[0].summary,full.replace(/\s+/g," ").slice(-200));
+  assert.ok(scanned<=full.length+rows.length*200,`quadratic text scanning returned: ${scanned}`);
 });

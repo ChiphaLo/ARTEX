@@ -24,34 +24,47 @@ export function advanceActivityUnread(
   };
 }
 
-// Delta rows carry text in metadata so SSE and history polling both update immediately.
-export function coalesceThinking(steps: Activity[]): Activity[] {
-  const streams = new Map<string, Activity>();
-  const out: Activity[] = [];
-  for (const step of steps) {
-    const id = step.metadata?.stream_id;
-    if (!id) {
-      out.push(step);
-      continue;
-    }
-    const previous = streams.get(id);
-    if (step.metadata?.stream_done) {
-      if (previous) {
-        Object.assign(previous, step, { detail: step.detail });
-      } else {
-        const row = { ...step };
-        streams.set(id, row);
-        out.push(row);
+// Keep one presentation row per thought. Only the bounded summary tail is
+// normalised: scanning the entire accumulated text for EVERY delta was quadratic,
+// even when the thought was collapsed. Previous published rows remain immutable.
+// Append-only updates reuse completed row objects; prepend/replace/trim/replay
+// rebuilds from the authoritative input instead of trusting seq alone.
+export class ThinkingProjection {
+  private input: Activity[] = [];
+  private output: Activity[] = [];
+  private streams = new Map<string, { index: number; tail: string }>();
+
+  project(steps: Activity[]): Activity[] {
+    if (steps === this.input) return this.output;
+    const append = steps.length >= this.input.length && this.input.every((step, i) => step === steps[i]);
+    const start = append ? this.input.length : 0;
+    if (!append) this.streams.clear();
+    const out = append ? [...this.output] : [];
+    for (let i = start; i < steps.length; i++) {
+      const step = steps[i];
+      const id = step.metadata?.stream_id;
+      if (!id) {
+        out.push(step);
+        continue;
       }
-    } else {
-      const text = (previous?.detail ?? "") + (step.metadata?.stream_delta ?? "");
-      if (previous) Object.assign(previous, { ...step, detail: text, summary: text.replace(/\s+/g, " ").slice(-200) });
-      else {
-        const row = { ...step, detail: text };
-        streams.set(id, row);
-        out.push(row);
-      }
+      const state = this.streams.get(id);
+      const previous = state ? out[state.index] : undefined;
+      const chunk = step.metadata?.stream_delta ?? "";
+      const done = step.metadata?.stream_done;
+      const tail = done ? "" : ((state?.tail ?? "") + chunk).replace(/\s+/g, " ").slice(-200);
+      const row = done
+        ? { ...step } // A final row without inline detail must lazy-load the full body.
+        : { ...step, detail: (previous?.detail ?? "") + chunk, summary: previous ? tail : step.summary };
+      const index = state?.index ?? out.length;
+      out[index] = row;
+      this.streams.set(id, { index, tail });
     }
+    this.input = steps;
+    this.output = out;
+    return out;
   }
-  return out;
+}
+
+export function coalesceThinking(steps: Activity[]): Activity[] {
+  return new ThinkingProjection().project(steps);
 }
