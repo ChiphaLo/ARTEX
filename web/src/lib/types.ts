@@ -617,6 +617,7 @@ export const FINDING_UNASSIGNED_ASSET = "__none__";
 
 // ---- Activity / sessions ----
 export type ActivityKind =
+  | "model_status"
   | "context_usage"
   | "retry"
   | "tool_use"
@@ -654,6 +655,16 @@ export interface Activity {
   summary: string;
   detail?: string;
   metadata?: {
+    model_progress?: {
+      stage: string;
+      phase: string;
+      started_at?: number;
+      last_data_at?: number;
+      bytes_received?: number;
+      chunk?: number;
+      groups_done?: number;
+      total_groups?: number;
+    };
     context_usage?: ContextUsage;
     delivery_mode?: "steer" | "queue";
     inbox_id?: number;

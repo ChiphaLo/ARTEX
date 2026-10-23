@@ -20,6 +20,7 @@ import (
 func doStream(ctx context.Context, cfg Config, url string, body []byte, setHeaders func(*http.Request), errPrefix string) (*http.Response, error) {
 	// Rate limit once per logical request (outside the retry loop, so retries do
 	// not consume additional tokens). Shared across all callers of this provider.
+	ReportCallProgress(ctx, CallProgress{Phase: "rate_limit"})
 	if err := cfg.limiter.Wait(ctx); err != nil {
 		return nil, err
 	}

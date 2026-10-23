@@ -13,7 +13,11 @@ export function advanceActivityUnread(
 ): ActivityUnreadState {
   const streamedDelta = step.kind === "thinking" && step.metadata?.stream_id && !step.metadata.stream_done;
   const countable =
-    step.kind !== "usage" && step.kind !== "context_usage" && !streamedDelta && !step.metadata?.context_excluded;
+    step.kind !== "usage" &&
+    step.kind !== "context_usage" &&
+    step.kind !== "model_status" &&
+    !streamedDelta &&
+    !step.metadata?.context_excluded;
   return {
     unread: active ? 0 : state.unread + (step.seq > state.unreadSeq && countable ? 1 : 0),
     unreadSeq: Math.max(state.unreadSeq, step.seq),

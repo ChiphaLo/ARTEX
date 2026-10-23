@@ -58,6 +58,18 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			emit(r)
 		}
 	}
+	var lastProgress llm.CallProgress
+	var lastProgressEmit time.Time
+	ctx = llm.WithCallProgress(ctx, func(p llm.CallProgress) {
+		now := time.Now()
+		if p.Phase == lastProgress.Phase && p.Stage == lastProgress.Stage && p.Chunk == lastProgress.Chunk && p.StartedAt == lastProgress.StartedAt && now.Sub(lastProgressEmit) < 2*time.Second {
+			return
+		}
+		lastProgress = p
+		lastProgressEmit = now
+		metadata, _ := json.Marshal(map[string]any{"model_progress": p})
+		rec(db.Activity{Kind: "model_status", Metadata: metadata})
+	})
 	toolNames := map[string]string{} // tool_use id -> name, to label results
 
 	var tbuf strings.Builder

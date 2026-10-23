@@ -22,6 +22,7 @@ func WindowedProviderSummarizer(p llm.Provider, window, maxOutputTokens int, non
 		work := pairForReplay(msgs)
 		groups := summaryGroups(work)
 		digest := ""
+		total, done, chunk := len(groups), 0, 0
 		for len(groups) > 0 {
 			if err := ctx.Err(); err != nil {
 				return "", err
@@ -56,7 +57,10 @@ func WindowedProviderSummarizer(p llm.Provider, window, maxOutputTokens int, non
 			if n == 0 {
 				return "", fmt.Errorf("compaction cannot fit a complete message/tool exchange within the %d-token window; history kept for the final overflow guard", window)
 			}
-			raw, err := streamSummaryChecked(ctx, p, maxOut, head, nonStreaming, true)
+			chunk++
+			chunkCtx := llm.WithCallScope(ctx, "compacting", chunk, done, total)
+			llm.ReportCallProgress(chunkCtx, llm.CallProgress{Phase: "starting"})
+			raw, err := streamSummaryChecked(chunkCtx, p, maxOut, head, nonStreaming, true)
 			if err != nil {
 				return "", err
 			}
@@ -64,6 +68,8 @@ func WindowedProviderSummarizer(p llm.Provider, window, maxOutputTokens int, non
 			if strings.TrimSpace(digest) == "" {
 				return "", fmt.Errorf("compaction returned an empty summary")
 			}
+			done += n
+			llm.ReportCallProgress(llm.WithCallScope(ctx, "compacting", chunk, done, total), llm.CallProgress{Phase: "chunk_finished"})
 			groups = groups[n:]
 		}
 		return digest, nil

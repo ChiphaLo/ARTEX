@@ -286,7 +286,7 @@ export default function DashboardPage() {
   const recentActivity = React.useMemo(
     () =>
       [...activity]
-        .filter((a) => a.kind !== "usage")
+        .filter((a) => a.kind !== "usage" && a.kind !== "model_status")
         .sort((a, b) => b.seq - a.seq)
         .slice(0, 6),
     [activity],
@@ -855,7 +855,7 @@ export default function DashboardPage() {
             </div>
             <div className="flex items-center gap-2">
               <span className="text-[10px] text-muted-foreground">
-                {activity.filter((a) => a.kind !== "usage").length} 条事件
+                {activity.filter((a) => a.kind !== "usage" && a.kind !== "model_status").length} 条事件
               </span>
               <Link
                 href="/function/tasks"

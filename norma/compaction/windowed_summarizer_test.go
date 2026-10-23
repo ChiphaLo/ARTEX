@@ -148,3 +148,31 @@ func TestRequestThresholdCanSummarizeShortLargeHistory(t *testing.T) {
 		t.Fatal("short history was not compacted", calls)
 	}
 }
+
+func TestWindowedSummaryReportsHiddenCompactionProgress(t *testing.T) {
+	p := &windowSummaryProvider{stop: "end_turn"}
+	var events []llm.CallProgress
+	ctx := llm.WithCallProgress(t.Context(), func(p llm.CallProgress) { events = append(events, p) })
+	var msgs []llm.Message
+	for range 30 {
+		msgs = append(msgs, llm.UserText(strings.Repeat("historical fixture ", 250)))
+	}
+	_, err := WindowedProviderSummarizer(p, 10000, 1000, true)(ctx, msgs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(p.reqs) < 2 {
+		t.Fatal("fixture must span chunks")
+	}
+	previous := 0
+	for _, ev := range events {
+		if ev.Stage != "compacting" || ev.GroupsDone < previous {
+			t.Fatal(ev)
+		}
+		previous = ev.GroupsDone
+	}
+	last := events[len(events)-1]
+	if last.Phase != "chunk_finished" || last.GroupsDone != last.TotalGroups {
+		t.Fatal(last)
+	}
+}

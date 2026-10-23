@@ -350,7 +350,7 @@ func (t quotaAwareTransport) RoundTrip(req *http.Request) (*http.Response, error
 	capt := llmrec.CaptureFrom(req.Context())
 	capt.SetRequest(requestBodySnapshot(req))
 
-	resp, err := t.base.RoundTrip(req)
+	resp, err := observedModelRoundTrip(req, t.base, modelHeaderTimeout, modelFirstByteTimeout, modelIdleTimeout)
 	if err != nil || resp == nil {
 		return resp, err
 	}

@@ -1,4 +1,5 @@
 "use client";
+import { modelProgressLabel } from "@/lib/model-progress";
 import { ChatImagePreview } from "@/components/chat-images";
 
 import * as React from "react";
@@ -85,7 +86,7 @@ function groupSteps(steps: Activity[], chat: boolean): Group[] {
   const out: Group[] = [];
   const byToolId = new Map<string, Extract<Group, { type: "tool" }>>();
   for (const s of coalesceThinking(steps)) {
-    if (s.kind === "usage" || s.kind === "context_usage") continue; // usage markers are not messages
+    if (s.kind === "usage" || s.kind === "context_usage" || s.kind === "model_status") continue; // usage markers are not messages
     if (s.kind === "round") {
       out.push({ type: "round", key: s.seq, label: s.summary || "新一轮" }); // planner round boundary
       continue;
@@ -906,9 +907,18 @@ export function Transcript({
             <span className="size-1.5 animate-bounce rounded-full bg-blue-500 [animation-delay:-0.15s]" />
             <span className="size-1.5 animate-bounce rounded-full bg-blue-500" />
           </span>
-          实时流式中…
+          <ModelProgress activity={activity} />
         </div>
       )}
     </div>
   );
+}
+
+function ModelProgress({ activity }: { activity: Activity[] }) {
+  const [now, setNow] = React.useState(() => Date.now());
+  React.useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(timer);
+  }, []);
+  return <span>{modelProgressLabel(activity, now)}</span>;
 }
