@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -185,6 +186,7 @@ ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS worker TEXT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS profile_name TEXT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS raw_request TEXT;
 ALTER TABLE llm_records ADD COLUMN IF NOT EXISTS raw_response TEXT;
+CREATE INDEX IF NOT EXISTS idx_llm_records_task_id ON llm_records(task_id,id);
 `
 
 // EnsureLLMRecordsTable creates the llm_records table if it does not exist.
@@ -242,7 +244,7 @@ func (d *DB) ListLLMRecords(model, session, task string, page, size int) ([]LLMR
 		argN++
 	}
 	if task != "" {
-		where += fmt.Sprintf(` AND COALESCE(task_id,'') = $%d`, argN)
+		where += fmt.Sprintf(` AND task_id = $%d`, argN)
 		args = append(args, task)
 		argN++
 	}
@@ -317,11 +319,28 @@ WHERE COALESCE(task_id,'') <> '' GROUP BY task_id ORDER BY MAX(id) DESC`)
 // DeleteLLMRecords removes every LLM record for one exact task_id — the same
 // match the page's task picker/filter uses. Returns rows deleted.
 func (d *DB) DeleteLLMRecords(task string) (int64, error) {
-	res, err := d.Exec(`DELETE FROM llm_records WHERE COALESCE(task_id,'') = $1`, task)
+	return d.DeleteLLMRecordsContext(context.Background(), task)
+}
+
+func (d *DB) DeleteLLMRecordsContext(parent context.Context, task string) (int64, error) {
+	ctx, cancel := context.WithTimeout(parent, taskDeleteBudget)
+	defer cancel()
+	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err
 	}
-	return res.RowsAffected()
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `SET LOCAL statement_timeout='30s'; SET LOCAL lock_timeout='5s'`); err != nil {
+		return 0, err
+	}
+	n, err := deleteOwnedRowsBatched(ctx, tx, "llm_records", task)
+	if err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return n, nil
 }
 
 // GetLLMRecord returns a single LLM record with full request/response bodies.

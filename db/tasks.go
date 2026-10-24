@@ -573,7 +573,7 @@ func (d *DB) DeleteTaskCascadePreparedContext(
 	prepare func(TaskDeletePreparation) error,
 ) (TaskDeleteResult, error) {
 	var result TaskDeleteResult
-	ctx, cancel := context.WithTimeout(parent, 2*time.Minute)
+	ctx, cancel := context.WithTimeout(parent, taskDeleteBudget)
 	defer cancel()
 	tx, err := d.BeginTx(ctx, nil)
 	if err != nil {
@@ -592,6 +592,19 @@ func (d *DB) DeleteTaskCascadePreparedContext(
 			return result, nil // already gone
 		}
 		return result, err
+	}
+	// Do the large private-table work before taking global asset/anchor locks or
+	// staging SQLite traffic. Other tasks' recorders must not wait for TOAST GC.
+	// Activity must go before nodes too: otherwise SET NULL rewrites rows the
+	// exploration cascade subsequently deletes. Cross-task FKs still run later.
+	if deleteLLMRecords {
+		result.LLMRecordsDeleted, err = deleteOwnedRowsBatched(ctx, tx, "llm_records", strconv.FormatInt(id, 10))
+		if err != nil {
+			return result, fmt.Errorf("删除任务 LLM 调试记录: %w", err)
+		}
+	}
+	if _, err := deleteOwnedRowsBatched(ctx, tx, "activity", expID); err != nil {
+		return result, fmt.Errorf("删除任务活动记录: %w", err)
 	}
 
 	// SHARE ROW EXCLUSIVE conflicts with every INSERT/UPDATE/DELETE on these
@@ -663,21 +676,8 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 		}
 		result.FindingsDeleted, _ = res.RowsAffected()
 	}
-	if deleteLLMRecords {
-		res, err := tx.ExecContext(ctx, `DELETE FROM llm_records WHERE COALESCE(task_id,'')=$1`, strconv.FormatInt(id, 10))
-		if err != nil {
-			return result, err
-		}
-		result.LLMRecordsDeleted, _ = res.RowsAffected()
-	}
 	// llm_usage (the token metering ledger) is intentionally NOT deleted with the
 	// task — it is kept as historical accounting even after the task is gone.
-	// Remove owned activity BEFORE cascading nodes: otherwise each node triggers
-	// an UPDATE ... SET node_id=NULL on rows the exploration cascade then deletes
-	// anyway. Other explorations' references retain the FK's SET NULL behavior.
-	if _, err := tx.ExecContext(ctx, `DELETE FROM activity WHERE exploration_id=$1`, expID); err != nil {
-		return result, fmt.Errorf("删除任务活动记录: %w", err)
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=$1`, id); err != nil {
 		return result, fmt.Errorf("删除任务及其会话关联记录: %w", err)
 	}

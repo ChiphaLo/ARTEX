@@ -137,7 +137,7 @@ func (s *Server) pgDeleteLLMRecords(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "missing task")
 		return
 	}
-	n, err := s.m.PG().DeleteLLMRecords(task)
+	n, err := s.m.PG().DeleteLLMRecordsContext(r.Context(), task)
 	if err != nil {
 		writeErr(w, 500, err.Error())
 		return
