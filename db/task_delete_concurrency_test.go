@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"testing"
@@ -8,6 +9,38 @@ import (
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+func TestTaskDeleteContextCancelsBlockedStatement(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	first, second, _, _ := createTaskDeleteRaceFixture(t, d)
+	t.Cleanup(func() { _ = d.DeleteTask(first.ID); _ = d.DeleteTask(second.ID) })
+	writer, err := d.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer writer.Rollback()
+	if _, err := writer.Exec(`SELECT id FROM tasks WHERE id=$1 FOR UPDATE`, first.ID); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err = d.DeleteTaskCascadePreparedContext(ctx, first.ID, true, false, false, nil)
+	if err == nil || time.Since(started) > time.Second {
+		t.Fatalf("blocked delete ignored cancellation: %v (%s)", err, time.Since(started))
+	}
+	if err := writer.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	var rows int
+	if err := d.QueryRow(`SELECT count(*) FROM tasks WHERE id=$1`, first.ID).Scan(&rows); err != nil || rows != 1 {
+		t.Fatalf("cancelled delete removed data: rows=%d err=%v", rows, err)
+	}
+}
 
 func TestDeleteTaskTrafficHostsUseOneLockedTransaction(t *testing.T) {
 	dsn := testDSN(t)

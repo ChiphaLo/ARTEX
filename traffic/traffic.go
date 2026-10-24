@@ -105,19 +105,16 @@ const (
 	// autoVacuumIncremental is SQLite's numeric value for auto_vacuum=incremental.
 	autoVacuumIncremental = 2
 	// reclaimChunkPages bounds how much index space one locked step returns to the
-	// filesystem (pages are 4KiB, so ~32MB). Reclamation holds the write lock, and
+	// filesystem (pages are 4KiB, so ~2MB). Reclamation holds the write lock, and
 	// record() runs before go-mitmproxy replies to the client, so an unbounded
 	// pass would stall the very requests being recorded.
-	reclaimChunkPages = 8192
+	reclaimChunkPages = 512
 	// reclaimMergePages bounds the full-text merge done alongside each chunk.
 	// Deleting from a contentless_delete index only writes tombstones; merging is
 	// what discards them, and left undone the index grows on every deletion.
 	reclaimMergePages = 256
-	// reclaimMergeSteps bounds how many merges one reclamation performs. fts5
-	// offers no way to ask whether an index has settled — its special INSERT
-	// registers a row change of its own, so change counting cannot tell a real
-	// merge from a no-op — so the budget is simply spent down, and whatever is
-	// left over falls to the next deletion.
+	// reclaimMergeSteps bounds merge work per pass. total_changes() distinguishes
+	// actual FTS work from the special INSERT's own single no-op change.
 	reclaimMergeSteps = 16
 	// reclaimMaxSteps backstops the loop. Both merging and incremental_vacuum are
 	// documented to stop making progress eventually, but a reclamation that cannot
@@ -125,7 +122,7 @@ const (
 	reclaimMaxSteps = 512
 	// reclaimBudget caps one background reclamation. Deleting a busy host can free
 	// gigabytes, and the next deletion resumes wherever this one stopped.
-	reclaimBudget = 5 * time.Minute
+	reclaimBudget = 30 * time.Second
 )
 
 // TrafficSearchDescription is persisted into the tool catalog for new and
@@ -156,6 +153,10 @@ type Traffic struct {
 	// reclaiming keeps a single background reclamation in flight. Concurrent ones
 	// would only contend for wmu, never finish sooner.
 	reclaiming atomic.Bool
+	// Protected by wmu. Keep an interrupted merge resumable across passes.
+	mergeStarted bool
+	// Nil uses the platform disk probe; overridden only by deterministic tests.
+	freeSpace func(string) (uint64, error)
 	// closed is shut by Close so a reclamation abandons its remaining budget
 	// instead of holding shutdown open for minutes. Nil on the zero value, which
 	// stopping() treats as "not closing".
@@ -1144,19 +1145,17 @@ func (t *Traffic) allHostTrees() ([]string, error) {
 // takes effect through the VACUUM that follows it, and both must run on the same
 // connection. Callers must hold wmu.
 func (t *Traffic) compactIndex() error {
-	ctx := context.Background()
+	if err := t.requireSpace(maintenanceReserve); err != nil {
+		return err
+	}
+	ctx, cancel := t.maintenanceContext(deleteBudget)
+	defer cancel()
 	conn, err := t.db.Conn(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	if t.fts {
-		// A full merge, not the bounded one reclaim uses: with the index emptied
-		// there is nothing left to merge, so this only discards the tombstones.
-		if _, err := conn.ExecContext(ctx, `INSERT INTO ex_fts(ex_fts) VALUES('optimize')`); err != nil {
-			return fmt.Errorf("合并全文索引: %w", err)
-		}
-	}
+	// DeleteAll has already used FTS5 delete-all, not per-document tombstones.
 	if _, err := conn.ExecContext(ctx, `PRAGMA auto_vacuum=incremental`); err != nil {
 		return err
 	}
@@ -1180,19 +1179,33 @@ func (t *Traffic) compactIndex() error {
 // full-text index rows, bodies, blob references, and finally the index rows.
 // Order matters — each sub-select reads exchanges, so that table is emptied last.
 func (t *Traffic) deleteWhere(tx *sql.Tx, where string, args ...any) (int64, error) {
+	ctx, cancel := t.maintenanceContext(deleteBudget)
+	defer cancel()
+	return t.deleteWhereContext(ctx, tx, where, args...)
+}
+
+func (t *Traffic) deleteWhereContext(ctx context.Context, tx *sql.Tx, where string, args ...any) (int64, error) {
+	if err := t.requireDeleteSpace(); err != nil {
+		return 0, err
+	}
 	if t.fts {
 		// ex_fts is contentless and addressed by rowid, hence the rowid sub-select.
-		if _, err := tx.Exec(`DELETE FROM ex_fts WHERE rowid IN (SELECT rowid FROM exchanges WHERE `+where+`)`, args...); err != nil {
+		query := `DELETE FROM ex_fts WHERE rowid IN (SELECT rowid FROM exchanges WHERE ` + where + `)`
+		ftsArgs := args
+		if where == "1=1" {
+			query, ftsArgs = `INSERT INTO ex_fts(ex_fts) VALUES('delete-all')`, nil
+		}
+		if _, err := tx.ExecContext(ctx, query, ftsArgs...); err != nil {
 			return 0, fmt.Errorf("删除全文索引: %w", err)
 		}
 	}
-	if _, err := tx.Exec(`DELETE FROM exchange_bodies WHERE id IN (SELECT id FROM exchanges WHERE `+where+`)`, args...); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM exchange_bodies WHERE id IN (SELECT id FROM exchanges WHERE `+where+`)`, args...); err != nil {
 		return 0, fmt.Errorf("删除正文: %w", err)
 	}
-	if _, err := tx.Exec(`DELETE FROM blob_refs WHERE exchange_id IN (SELECT id FROM exchanges WHERE `+where+`)`, args...); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM blob_refs WHERE exchange_id IN (SELECT id FROM exchanges WHERE `+where+`)`, args...); err != nil {
 		return 0, fmt.Errorf("删除 blob 引用: %w", err)
 	}
-	res, err := tx.Exec(`DELETE FROM exchanges WHERE `+where, args...)
+	res, err := tx.ExecContext(ctx, `DELETE FROM exchanges WHERE `+where, args...)
 	if err != nil {
 		return 0, fmt.Errorf("删除索引行: %w", err)
 	}
@@ -1411,6 +1424,10 @@ func (t *Traffic) StageDeleteHostsExact(hosts []string) (*HostDeleteStage, error
 	return t.stageDeleteHostsExact(hosts, 0, 0)
 }
 
+func (t *Traffic) StageDeleteHostsExactContext(ctx context.Context, hosts []string) (*HostDeleteStage, error) {
+	return t.stageDeleteHostsExactContext(ctx, hosts, 0, 0)
+}
+
 // StageDeleteHostsExactForArchive ties the reversible traffic deletion to a
 // persistent task archive. Startup recovery uses archiveCommitted to decide
 // whether an interrupted stage must be completed or rolled back.
@@ -1422,6 +1439,10 @@ func (t *Traffic) StageDeleteHostsExactForArchive(hosts []string, archiveID, tas
 }
 
 func (t *Traffic) stageDeleteHostsExact(hosts []string, archiveID, taskID int64) (*HostDeleteStage, error) {
+	return t.stageDeleteHostsExactContext(context.Background(), hosts, archiveID, taskID)
+}
+
+func (t *Traffic) stageDeleteHostsExactContext(parent context.Context, hosts []string, archiveID, taskID int64) (*HostDeleteStage, error) {
 	t.wmu.Lock()
 	stage := &HostDeleteStage{traffic: t}
 	fail := func(cause error) (*HostDeleteStage, error) {
@@ -1459,8 +1480,10 @@ func (t *Traffic) stageDeleteHostsExact(hosts []string, archiveID, taskID int64)
 		return abort(err)
 	}
 	stage.tx = tx
+	ctx, cancel := t.maintenanceContextFrom(parent, deleteBudget)
+	defer cancel()
 	for _, h := range unique {
-		n, err := t.deleteWhere(tx, `host=?`, h)
+		n, err := t.deleteWhereContext(ctx, tx, `host=?`, h)
 		if err != nil {
 			return fail(err)
 		}
@@ -1702,55 +1725,83 @@ func (t *Traffic) indexBytes() int64 {
 // Best-effort throughout. Failing to reclaim costs disk space, never
 // correctness, so errors are logged and the next deletion resumes the work.
 func (t *Traffic) reclaim() {
-	if !t.reclaiming.CompareAndSwap(false, true) {
-		return // one pass at a time; a second would only contend for the lock
+	if t.stopping() || !t.reclaiming.CompareAndSwap(false, true) {
+		return
 	}
 	t.reaping.Go(func() {
 		defer t.reclaiming.Store(false)
-		// One pinned connection for the whole pass: a long reclamation issues
-		// hundreds of statements, and letting the pool hand each one a different
-		// connection would both churn connections and split the freelist readings
-		// that decide when to stop away from the vacuum they measure.
-		ctx := context.Background()
+		ctx, cancel := t.maintenanceContext(reclaimBudget)
+		defer cancel()
 		conn, err := t.db.Conn(ctx)
 		if err != nil {
-			log.Printf("[traffic] 回收索引空间失败（获取连接）：%v", err)
+			if !t.stopping() {
+				log.Printf("[traffic] 回收索引空间失败（获取连接）：%v", err)
+			}
 			return
 		}
 		defer conn.Close()
-		deadline := time.Now().Add(reclaimBudget)
-		merges := reclaimMergeSteps
-		for step := 0; ; step++ {
+		// Also drain a rolled-back/interrupted chunk on exit. A fresh, short
+		// context is necessary when the pass's own context has been cancelled.
+		defer func() {
 			t.wmu.Lock()
-			progressed, err := t.reclaimChunk(ctx, conn, &merges)
+			defer t.wmu.Unlock()
+			if t.requireSpace(maintenanceReserve) != nil {
+				return
+			}
+			cleanup, stop := context.WithTimeout(context.Background(), checkpointBudget)
+			defer stop()
+			_, _ = checkpointIndex(cleanup, conn)
+		}()
+		merges := reclaimMergeSteps
+		for step := 0; step < reclaimMaxSteps; step++ {
+			if ctx.Err() != nil {
+				return
+			}
+			t.wmu.Lock()
+			if err := t.requireSpace(maintenanceReserve); err != nil {
+				t.wmu.Unlock()
+				log.Printf("[traffic] 索引回收已暂停：%v", err)
+				return
+			}
+			chunkCtx, stop := context.WithTimeout(ctx, reclaimStepBudget)
+			progressed, err := t.reclaimChunk(chunkCtx, conn, &merges)
+			stop()
+			// Checkpoint EACH chunk, not only a fully completed pass. Waiting
+			// until the end allowed a multi-GB WAL to fill the root filesystem.
+			checkpointCtx, stopCheckpoint := context.WithTimeout(ctx, checkpointBudget)
+			drained, checkpointErr := checkpointIndex(checkpointCtx, conn)
+			stopCheckpoint()
 			t.wmu.Unlock()
 			if err != nil {
-				log.Printf("[traffic] 回收索引空间失败：%v", err)
+				if !t.stopping() {
+					log.Printf("[traffic] 回收索引空间已停止：%v", err)
+				}
+				return
+			}
+			if checkpointErr != nil || !drained {
+				if !t.stopping() {
+					if checkpointErr != nil {
+						log.Printf("[traffic] 索引回收已暂停（WAL 检查点失败）：%v", checkpointErr)
+					} else {
+						log.Printf("[traffic] 索引回收已暂停：活跃读取者阻止 WAL 排空")
+					}
+				}
 				return
 			}
 			if !progressed {
-				break
-			}
-			if t.stopping() {
-				return // shutdown must not wait out the remaining budget
-			}
-			if step+1 >= reclaimMaxSteps {
-				log.Printf("[traffic] 索引空间回收未做完（已用满 %d 步上限），下次删除时继续", reclaimMaxSteps)
 				return
 			}
-			if time.Now().After(deadline) {
-				log.Printf("[traffic] 索引空间回收未做完（已用满 %s 预算），下次删除时继续", reclaimBudget)
+			// Give the recorder and other disk users a turn instead of running
+			// an uninterrupted CPU/I/O loop under the guise of background work.
+			timer := time.NewTimer(reclaimYield)
+			select {
+			case <-ctx.Done():
+				timer.Stop()
 				return
+			case <-timer.C:
 			}
 		}
-		// Truncating the log is what makes the reclamation visible on disk: in WAL
-		// mode the freed pages are recorded there first, and a PASSIVE checkpoint
-		// would leave the log itself sitting at its high-water mark.
-		t.wmu.Lock()
-		defer t.wmu.Unlock()
-		if _, err := conn.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
-			log.Printf("[traffic] 截断 WAL 失败：%v", err)
-		}
+		log.Printf("[traffic] 索引空间回收已达到分步预算，下次删除时继续")
 	})
 }
 
@@ -1760,12 +1811,16 @@ func (t *Traffic) reclaim() {
 func (t *Traffic) reclaimChunk(ctx context.Context, conn *sql.Conn, merges *int) (bool, error) {
 	progressed := false
 	if t.fts && *merges > 0 {
-		// A negative rank is fts5's page budget for one incremental merge.
-		if _, err := conn.ExecContext(ctx, `INSERT INTO ex_fts(ex_fts, rank) VALUES('merge', ?)`, -reclaimMergePages); err != nil {
+		var err error
+		progressed, err = t.mergeIndex(ctx, conn)
+		if err != nil {
 			return false, fmt.Errorf("合并全文索引: %w", err)
 		}
-		*merges--
-		progressed = true
+		if progressed {
+			*merges--
+		} else {
+			*merges = 0
+		}
 	}
 	if !t.incrementalVacuum {
 		// incremental_vacuum is a silent no-op on a database created with
