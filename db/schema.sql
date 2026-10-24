@@ -320,6 +320,9 @@ ALTER TABLE activity ADD COLUMN IF NOT EXISTS metadata JSONB NOT NULL DEFAULT '{
 -- original session). Only worker='mainagent' rows carry it.
 ALTER TABLE activity ADD COLUMN IF NOT EXISTS main_seg INTEGER;
 CREATE INDEX IF NOT EXISTS idx_act_node  ON activity(exploration_id, node_id, id);
+-- ON DELETE SET NULL probes activity by node_id ALONE for every deleted node.
+-- The exploration-leading pagination index cannot support that FK lookup.
+CREATE INDEX IF NOT EXISTS idx_act_node_fk ON activity(node_id);
 CREATE INDEX IF NOT EXISTS idx_act_since ON activity(exploration_id, id);
 CREATE INDEX IF NOT EXISTS idx_act_tool_call ON activity(exploration_id, tool_use_id, id)
   WHERE kind IN ('tool_use', 'tool_result');

@@ -4,11 +4,110 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
 	_ "github.com/jackc/pgx/v5/stdlib"
 )
+
+func TestTaskDeleteClearsActivityBeforeNodeCascadeAndRollsBackAtomically(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	first, err := d.CreateTask("bulk deletion fixture", "synthetic", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := d.CreateTask("retained activity fixture", "synthetic", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.DeleteTask(first.ID); _ = d.DeleteTask(second.ID) })
+	var hasFKIndex bool
+	if err := d.QueryRow(`SELECT EXISTS (
+ SELECT 1 FROM pg_index i JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attname='node_id'
+ WHERE i.indrelid='activity'::regclass AND i.indisvalid AND i.indpred IS NULL
+ AND (i.indkey::smallint[])[0]=a.attnum)`).Scan(&hasFKIndex); err != nil || !hasFKIndex {
+		t.Fatalf("node_id-only FK lookup has no leading index: %v", err)
+	}
+	var origin int64
+	if origin, err = d.Exploration(first.ExplorationID).OriginFactID(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO exploration_nodes(exploration_id,kind,state,payload)
+ SELECT $1,'intent','open','{}'::jsonb FROM generate_series(1,512)`, first.ExplorationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO activity(exploration_id,node_id,kind)
+ SELECT n.exploration_id,n.id,'text' FROM exploration_nodes n CROSS JOIN generate_series(1,16)
+ WHERE n.exploration_id=$1`, first.ExplorationID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(`INSERT INTO activity(exploration_id,kind) SELECT $1,'text' FROM generate_series(1,20000)`, second.ExplorationID); err != nil {
+		t.Fatal(err)
+	}
+	var crossReference int64
+	if err := d.QueryRow(`INSERT INTO activity(exploration_id,node_id,kind) VALUES($1,$2,'text') RETURNING id`, second.ExplorationID, origin).Scan(&crossReference); err != nil {
+		t.Fatal(err)
+	}
+	var ownedBefore int
+	if err := d.QueryRow(`SELECT count(*) FROM activity WHERE exploration_id=$1`, first.ExplorationID).Scan(&ownedBefore); err != nil {
+		t.Fatal(err)
+	}
+	// The guard makes the old update-then-delete order fail deterministically,
+	// without a flaky timing assertion or using any production task contents.
+	fn := fmt.Sprintf("test_delete_guard_%d", first.ID)
+	activityTrigger := fn + "_activity"
+	explorationTrigger := fn + "_exploration"
+	if _, err := d.Exec(`CREATE FUNCTION ` + fn + `() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic deletion guard'; END $$`); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_, _ = d.Exec(`DROP TRIGGER IF EXISTS ` + activityTrigger + ` ON activity`)
+		_, _ = d.Exec(`DROP TRIGGER IF EXISTS ` + explorationTrigger + ` ON explorations`)
+		_, _ = d.Exec(`DROP FUNCTION IF EXISTS ` + fn + `() `)
+	})
+	if _, err := d.Exec(fmt.Sprintf(`CREATE TRIGGER %s BEFORE UPDATE OF node_id ON activity FOR EACH ROW WHEN (OLD.exploration_id=%d) EXECUTE FUNCTION %s()`, activityTrigger, first.ExplorationID, fn)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.Exec(fmt.Sprintf(`CREATE TRIGGER %s BEFORE DELETE ON explorations FOR EACH ROW WHEN (OLD.id=%d) EXECUTE FUNCTION %s()`, explorationTrigger, first.ExplorationID, fn)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := d.DeleteTaskCascadePreparedContext(t.Context(), first.ID, false, false, false, nil); err == nil || !strings.Contains(err.Error(), "删除任务图谱") {
+		t.Fatalf("expected downstream failure after activity preparation: %v", err)
+	}
+	var ownedAfter int
+	if err := d.QueryRow(`SELECT count(*) FROM activity WHERE exploration_id=$1`, first.ExplorationID).Scan(&ownedAfter); err != nil || ownedAfter != ownedBefore {
+		t.Fatalf("failed delete lost activity: before=%d after=%d err=%v", ownedBefore, ownedAfter, err)
+	}
+	var retainedNode sql.NullInt64
+	if err := d.QueryRow(`SELECT node_id FROM activity WHERE id=$1`, crossReference).Scan(&retainedNode); err != nil || !retainedNode.Valid || retainedNode.Int64 != origin {
+		t.Fatalf("failed deletion mutated another task's reference: %v %v", retainedNode, err)
+	}
+	if _, err := d.Exec(`DROP TRIGGER ` + explorationTrigger + ` ON explorations`); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	started := time.Now()
+	if _, err := d.DeleteTaskCascadePreparedContext(ctx, first.ID, false, false, false, nil); err != nil {
+		t.Fatal(err)
+	}
+	t.Logf("deleted 512+ nodes and %d owned activities with 20001 retained activities in %s", ownedBefore, time.Since(started))
+	if err := d.QueryRow(`SELECT count(*) FROM activity WHERE exploration_id=$1`, first.ExplorationID).Scan(&ownedAfter); err != nil || ownedAfter != 0 {
+		t.Fatalf("owned activity remained: %d %v", ownedAfter, err)
+	}
+	if err := d.QueryRow(`SELECT node_id FROM activity WHERE id=$1`, crossReference).Scan(&retainedNode); err != nil || retainedNode.Valid {
+		t.Fatalf("retained cross-reference was not nullified: %v %v", retainedNode, err)
+	}
+	var retainedCount int
+	if err := d.QueryRow(`SELECT count(*) FROM activity WHERE exploration_id=$1`, second.ExplorationID).Scan(&retainedCount); err != nil || retainedCount != 20001 {
+		t.Fatalf("other task activity was deleted: %d %v", retainedCount, err)
+	}
+}
 
 func TestTaskDeleteContextCancelsBlockedStatement(t *testing.T) {
 	d, err := Open(testDSN(t))

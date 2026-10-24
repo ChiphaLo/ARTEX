@@ -672,11 +672,17 @@ DELETE FROM assets a USING deletable d WHERE a.id=d.id`, id, expID)
 	}
 	// llm_usage (the token metering ledger) is intentionally NOT deleted with the
 	// task — it is kept as historical accounting even after the task is gone.
+	// Remove owned activity BEFORE cascading nodes: otherwise each node triggers
+	// an UPDATE ... SET node_id=NULL on rows the exploration cascade then deletes
+	// anyway. Other explorations' references retain the FK's SET NULL behavior.
+	if _, err := tx.ExecContext(ctx, `DELETE FROM activity WHERE exploration_id=$1`, expID); err != nil {
+		return result, fmt.Errorf("删除任务活动记录: %w", err)
+	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM tasks WHERE id=$1`, id); err != nil {
-		return result, err
+		return result, fmt.Errorf("删除任务及其会话关联记录: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM explorations WHERE id=$1`, expID); err != nil {
-		return result, err
+		return result, fmt.Errorf("删除任务图谱及其关联记录: %w", err)
 	}
 	return result, tx.Commit()
 }
