@@ -218,3 +218,162 @@ func TestCancelledDeleteDoesNotRemoveRows(t *testing.T) {
 		t.Fatalf("partial deletion: count=%d err=%v", n, err)
 	}
 }
+
+func TestFTSDeleteDefersImplicitMergesAndRestoresSettings(t *testing.T) {
+	tr, _ := openTraffic(t)
+	if !tr.fts {
+		t.Skip("FTS5 unavailable")
+	}
+	for _, q := range []string{
+		`INSERT INTO ex_fts(ex_fts,rank) VALUES('automerge',0)`,
+		`INSERT INTO ex_fts(ex_fts,rank) VALUES('crisismerge',1000)`,
+	} {
+		if _, err := tr.DB().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Eight independent segments. Half the rows in EACH segment are deleted,
+	// making automatic tombstone merges eligible even on an otherwise quiet DB.
+	for segment := 0; segment < 8; segment++ {
+		tx, err := tr.DB().Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := 0; i < 24; i++ {
+			host := "kept.example"
+			if i%2 == 0 {
+				host = "deleted.example"
+			}
+			res, err := tx.Exec(`INSERT INTO exchanges(id,host) VALUES(?,?)`, fmt.Sprintf("%d-%d", segment, i), host)
+			if err != nil {
+				t.Fatal(err)
+			}
+			rowid, _ := res.LastInsertId()
+			if _, err := tx.Exec(`INSERT INTO ex_fts(rowid,content) VALUES(?,?)`, rowid, strings.Repeat(fmt.Sprintf("sharedmarker segment%d document%d ", segment, i), 120)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, q := range []string{
+		`INSERT INTO ex_fts(ex_fts,rank) VALUES('automerge',2)`,
+		`INSERT INTO ex_fts(ex_fts,rank) VALUES('crisismerge',2)`,
+		`INSERT INTO ex_fts(ex_fts,rank) VALUES('deletemerge',1)`,
+	} {
+		if _, err := tr.DB().Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	var before, legacyAfter, after int
+	if err := tr.DB().QueryRow(`SELECT count(DISTINCT segid) FROM ex_fts_idx`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	legacy, err := tr.DB().Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := legacy.Exec(`DELETE FROM ex_fts WHERE rowid IN (SELECT rowid FROM exchanges WHERE host=?)`, "deleted.example"); err != nil {
+		t.Fatal(err)
+	}
+	// Force the pending tombstone flush that also occurs at transaction sync
+	// (or mid-statement when the in-memory buffer fills on a large deletion).
+	if _, err := legacy.Exec(`INSERT INTO ex_fts(ex_fts,rank) VALUES('merge',0)`); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.QueryRow(`SELECT count(DISTINCT segid) FROM ex_fts_idx`).Scan(&legacyAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := legacy.Rollback(); err != nil {
+		t.Fatal(err)
+	}
+	if legacyAfter >= before {
+		t.Fatalf("fixture did not trigger old implicit merge: %d -> %d", before, legacyAfter)
+	}
+	stage, err := tr.StageDeleteHostsExact([]string{"deleted.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Rollback()
+	if err := stage.tx.QueryRow(`SELECT count(DISTINCT segid) FROM ex_fts_idx`).Scan(&after); err != nil {
+		t.Fatal(err)
+	}
+	if after != before {
+		t.Fatalf("DELETE rewrote segments: %d -> %d", before, after)
+	}
+	for key, want := range map[string]int{"automerge": 2, "crisismerge": 2, "deletemerge": 1} {
+		var got int
+		if err := stage.tx.QueryRow(`SELECT v FROM ex_fts_config WHERE k=?`, key).Scan(&got); err != nil || got != want {
+			t.Fatalf("%s not restored: %d, %v", key, got, err)
+		}
+	}
+	t.Logf("legacy DELETE merged %d -> %d segments; bounded path retained %d", before, legacyAfter, after)
+	// Commit must not postpone the same unbounded automatic merge until after
+	// settings restoration. Keep our background reclaimer out of this assertion.
+	tr.reclaiming.Store(true)
+	if err := stage.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := tr.DB().QueryRow(`SELECT count(DISTINCT segid) FROM ex_fts_idx`).Scan(&after); err != nil || after != before {
+		t.Fatalf("commit performed an implicit merge: %d -> %d, %v", before, after, err)
+	}
+	tr.reclaiming.Store(false)
+	tr.reclaim()
+	tr.reaping.Wait()
+	var matches int
+	if err := tr.DB().QueryRow(`SELECT count(*) FROM ex_fts WHERE ex_fts MATCH 'sharedmarker'`).Scan(&matches); err != nil || matches != 96 {
+		t.Fatalf("retained search results=%d err=%v", matches, err)
+	}
+}
+
+func TestInterruptedWriteAutoRollbackRestoresDeletion(t *testing.T) {
+	tr, _ := openTraffic(t)
+	bulkRecord(tr, "interrupted.example", 2, 1024)
+	if _, err := tr.DB().Exec(`CREATE TABLE abort_probe(n INTEGER)`); err != nil {
+		t.Fatal(err)
+	}
+	stage, err := tr.StageDeleteHostsExact([]string{"interrupted.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stage.Rollback()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	_, err = stage.tx.ExecContext(ctx, `INSERT INTO abort_probe WITH RECURSIVE n(x) AS (VALUES(0) UNION ALL SELECT x+1 FROM n WHERE x<100000000) SELECT x FROM n`)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("write was not interrupted: %v", err)
+	}
+	if err := stage.Rollback(); err != nil {
+		t.Fatalf("automatic rollback reported as failure: %v", err)
+	}
+	if n, err := tr.Count(); err != nil || n != 2 {
+		t.Fatalf("delete survived automatic rollback: count=%d err=%v", n, err)
+	}
+	var n int
+	if err := tr.DB().QueryRow(`SELECT count(*) FROM abort_probe`).Scan(&n); err != nil || n != 0 {
+		t.Fatalf("cancelled write persisted: count=%d err=%v", n, err)
+	}
+	if _, err := tr.DeleteHostsExact([]string{"interrupted.example"}); err != nil {
+		t.Fatalf("connection not reusable after interruption: %v", err)
+	}
+}
+
+type rollbackTestError struct {
+	message string
+	code    int
+}
+
+func (e rollbackTestError) Error() string { return e.message }
+func (e rollbackTestError) Code() int     { return e.code }
+
+func TestRollbackOnlyIgnoresKnownAlreadyEndedTransaction(t *testing.T) {
+	if !rollbackAlreadyComplete(rollbackTestError{"SQL logic error: cannot rollback - no transaction is active (1)", 1}) {
+		t.Fatal("automatic rollback not recognized")
+	}
+	for _, err := range []error{errors.New("cannot rollback - no transaction is active"), rollbackTestError{"disk I/O error", 10}, rollbackTestError{"some other SQL logic error", 1}} {
+		if rollbackAlreadyComplete(err) {
+			t.Fatalf("real rollback error hidden: %v", err)
+		}
+	}
+}

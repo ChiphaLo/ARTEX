@@ -1042,7 +1042,7 @@ func (t *Traffic) DeleteHost(host string) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	defer t.rollbackDelete(tx) //nolint:errcheck // no-op once committed
 	n, err := t.deleteWhere(tx, `host LIKE ?`, like)
 	if err != nil {
 		return 0, err
@@ -1093,7 +1093,7 @@ func (t *Traffic) DeleteAll() (deleted int64, reclaimed int64, err error) {
 	if err != nil {
 		return 0, 0, err
 	}
-	defer tx.Rollback() //nolint:errcheck // no-op once committed
+	defer t.rollbackDelete(tx) //nolint:errcheck // no-op once committed
 	if deleted, err = t.deleteWhere(tx, `1=1`); err != nil {
 		return 0, 0, err
 	}
@@ -1189,13 +1189,7 @@ func (t *Traffic) deleteWhereContext(ctx context.Context, tx *sql.Tx, where stri
 		return 0, err
 	}
 	if t.fts {
-		// ex_fts is contentless and addressed by rowid, hence the rowid sub-select.
-		query := `DELETE FROM ex_fts WHERE rowid IN (SELECT rowid FROM exchanges WHERE ` + where + `)`
-		ftsArgs := args
-		if where == "1=1" {
-			query, ftsArgs = `INSERT INTO ex_fts(ex_fts) VALUES('delete-all')`, nil
-		}
-		if _, err := tx.ExecContext(ctx, query, ftsArgs...); err != nil {
+		if err := deleteFTSWhere(ctx, tx, where, args...); err != nil {
 			return 0, fmt.Errorf("删除全文索引: %w", err)
 		}
 	}
@@ -1619,7 +1613,7 @@ func (t *Traffic) deleteArchivedHosts(hosts []string) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback() //nolint:errcheck
+	defer t.rollbackDelete(tx) //nolint:errcheck
 	for _, host := range hosts {
 		if _, err := t.deleteWhere(tx, `host=?`, host); err != nil {
 			return err
@@ -1655,7 +1649,7 @@ func (s *HostDeleteStage) rollbackLocked() error {
 	}
 	var errs []error
 	if s.tx != nil {
-		if err := s.tx.Rollback(); err != nil && !errors.Is(err, sql.ErrTxDone) {
+		if err := s.traffic.rollbackDelete(s.tx); err != nil {
 			errs = append(errs, fmt.Errorf("回滚流量索引: %w", err))
 		}
 	}
