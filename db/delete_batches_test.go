@@ -232,3 +232,88 @@ func TestDeleteLLMRecordsContextExactOwnershipAndExtremeIDs(t *testing.T) {
 		t.Fatalf("non-exact owner changed: %d %v", retained, err)
 	}
 }
+
+func TestDeleteBatchesBoundPayloadBytesAndAllowOneOversizedRow(t *testing.T) {
+	d, err := Open(testDSN(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := d.EnsureLLMRecordsTable(); err != nil {
+		d.Close()
+		t.Fatal(err)
+	}
+	task, err := d.CreateTask("byte-limited deletion fixture", "synthetic", nil, 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := strconv.FormatInt(task.ID, 10)
+	name := fmt.Sprintf("test_delete_bytes_%d", time.Now().UnixNano())
+	defer func() {
+		for _, table := range []string{"llm_records", "activity"} {
+			_, _ = d.Exec(`DROP TRIGGER IF EXISTS ` + name + ` ON ` + table)
+		}
+		_, _ = d.Exec(`DROP FUNCTION IF EXISTS ` + name + `() `)
+		_, _ = d.Exec(`DELETE FROM llm_records WHERE task_id=$1`, owner)
+		_ = d.DeleteTask(task.ID)
+		d.Close()
+	}()
+	// MD5 streams avoid compressible padding: six 3.2MB records plus one 9.6MB
+	// record force the byte limit, even though there are fewer than 128 rows.
+	for _, table := range []string{"llm_records", "activity"} {
+		column, ownerColumn := "raw_request", "task_id"
+		var value any = owner
+		if table == "activity" {
+			column, ownerColumn = "detail", "exploration_id"
+			value = task.ExplorationID
+		}
+		query := fmt.Sprintf(`INSERT INTO %s(%s,%s) SELECT $1,(SELECT string_agg(md5(g::text||':'||n::text),'') FROM generate_series(1,CASE WHEN n=7 THEN 300000 ELSE 100000 END) g) FROM generate_series(1,7) n`, table, ownerColumn, column)
+		if _, err := d.Exec(query, value); err != nil {
+			t.Fatal(err)
+		}
+		var maxBytes int64
+		if err := d.QueryRow(fmt.Sprintf(`SELECT max(pg_column_size(%s)) FROM %s WHERE %s=$1`, column, table, ownerColumn), value).Scan(&maxBytes); err != nil || maxBytes <= deleteBatchBytes {
+			t.Fatalf("oversized fixture missing: %d %v", maxBytes, err)
+		}
+	}
+	if _, err := d.Exec(fmt.Sprintf(`CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$
+ DECLARE n bigint; bytes bigint;
+ BEGIN
+ IF TG_TABLE_NAME='llm_records' THEN
+  SELECT count(*),coalesce(sum(128::bigint+coalesce(pg_column_size(raw_request),0)),0) INTO n,bytes FROM deleted_byte_rows WHERE task_id='%s';
+ ELSE
+  SELECT count(*),coalesce(sum(128::bigint+coalesce(pg_column_size(detail),0)+coalesce(pg_column_size(metadata),0)),0) INTO n,bytes FROM deleted_byte_rows WHERE exploration_id=%d;
+ END IF;
+ IF n>1 AND bytes>%d THEN RAISE EXCEPTION 'batch byte limit exceeded'; END IF;
+ RETURN NULL; END $$`, name, owner, task.ExplorationID, deleteBatchBytes)); err != nil {
+		t.Fatal(err)
+	}
+	for _, table := range []string{"llm_records", "activity"} {
+		if _, err := d.Exec(`CREATE TRIGGER ` + name + ` AFTER DELETE ON ` + table + ` REFERENCING OLD TABLE AS deleted_byte_rows FOR EACH STATEMENT EXECUTE FUNCTION ` + name + `() `); err != nil {
+			t.Fatal(err)
+		}
+		var value any = owner
+		if table == "activity" {
+			value = task.ExplorationID
+		}
+		tx, err := d.Begin()
+		if err != nil {
+			t.Fatal(err)
+		}
+		n, err := deleteOwnedRowsBatched(t.Context(), tx, table, value)
+		if err != nil || n != 7 {
+			_ = tx.Rollback()
+			t.Fatalf("%s byte-bounded delete=(%d,%v)", table, n, err)
+		}
+		if err := tx.Rollback(); err != nil {
+			t.Fatal(err)
+		}
+		var remaining int
+		col := "task_id"
+		if table == "activity" {
+			col = "exploration_id"
+		}
+		if err := d.QueryRow(`SELECT count(*) FROM `+table+` WHERE `+col+`=$1`, value).Scan(&remaining); err != nil || remaining != 7 {
+			t.Fatalf("rollback lost byte fixture rows: %d %v", remaining, err)
+		}
+	}
+}
