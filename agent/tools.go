@@ -781,24 +781,12 @@ func (t *ToolSet) relatedTaskOverviews() []map[string]any {
 		intentResults := compactIntents(recentDone, parentsOf, yieldsOf)
 		for i, intent := range recentDone {
 			intentResults[i]["summary"] = budget.take(intentResults[i]["summary"], 400)
-			acts, _, err := ts.ActivityPageForTerminalIntent(intent.ID, 0, 20)
+			output, err := ts.LatestWorkerOutputSummary(intent.ID, true)
 			if err != nil {
 				continue
 			}
-			var resultSummary, textFallback string
-			for _, activity := range acts {
-				switch activity.Kind {
-				case "result":
-					resultSummary = activity.Summary
-				case "text":
-					textFallback = activity.Summary
-				}
-			}
-			if resultSummary == "" {
-				resultSummary = textFallback
-			}
-			if resultSummary != "" {
-				intentResults[i]["result_summary"] = budget.take(resultSummary, 800)
+			if output != nil && output.Summary != "" {
+				intentResults[i]["result_summary"] = budget.take(output.Summary, 800)
 			}
 		}
 		item["recent_intent_results"] = intentResults
@@ -1774,23 +1762,9 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 			if intentNode == nil || intentNode.Kind != db.KindIntent {
 				return actool.Errorf("intent_id 不属于本任务或其直接关联任务"), nil
 			}
-			acts, _, err := t.ts.ActivityListWithSources(id, 0, 1000)
+			pick, err := t.ts.LatestWorkerOutputWithSources(id)
 			if err != nil {
 				return actool.Errorf(err.Error()), nil
-			}
-			var chosen, fallback *db.Activity
-			for i := range acts {
-				switch acts[i].Kind {
-				case "result":
-					chosen = &acts[i]
-					fallback = &acts[i]
-				case "text":
-					fallback = &acts[i]
-				}
-			}
-			pick := chosen
-			if pick == nil {
-				pick = fallback
 			}
 			if pick == nil {
 				if intentNode.Inherited {
@@ -1800,7 +1774,7 @@ func (t *ToolSet) getWorkerOutput() actool.CoreTool {
 				}
 				return actool.Text("（该 work 尚无任何输出）"), nil
 			}
-			detail, _ := t.ts.ActivityDetailWithSources(pick.ID)
+			detail := pick.Detail
 			if detail == "" {
 				detail = pick.Summary
 			}

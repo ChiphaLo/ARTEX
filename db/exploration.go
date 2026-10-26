@@ -1768,15 +1768,16 @@ func scanTrace(rows *sql.Rows) ([]Activity, error) {
 const traceCols = `id, node_id, COALESCE(worker,''), COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(summary,'')`
 
 // ActivityTrace lists one work's steps (by intent/node id) for the trace tools:
-// summaries only (detail is lazy — fetch via ActivityByIDs). thinking/usage/context_usage rows
-// are dropped so the caller sees the work's actions + observations, not the
-// model's internal reasoning or token-accounting noise.
+// summaries only (detail is lazy — fetch via ActivityByIDs). UI diagnostics,
+// progress, reasoning and accounting are dropped so the caller sees actions and
+// observations, not host-generated runtime errors or model-internal noise.
 func (s *ExplorationStore) ActivityTrace(nodeID int64, limit int) ([]Activity, error) {
 	if limit <= 0 {
 		limit = 500
 	}
 	rows, err := s.db.Query(`SELECT `+traceCols+`
 FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage','context_usage')
+AND `+modelActivitySQL("")+`
 ORDER BY id LIMIT $3`, s.expID, nodeID, limit)
 	if err != nil {
 		return nil, err
@@ -1797,6 +1798,7 @@ func (s *ExplorationStore) ActivityTraceForTerminalIntent(nodeID int64, limit in
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
 	  AND a.kind NOT IN ('thinking','usage','context_usage')
+	  AND `+modelActivitySQL("a")+`
 	ORDER BY a.id LIMIT $3`, s.expID, nodeID, limit)
 	if err != nil {
 		return nil, err
@@ -1819,10 +1821,12 @@ func (s *ExplorationStore) ActivityTraceSearch(nodeID *int64, q string, limit in
 	if nodeID != nil {
 		rows, err = s.db.Query(`SELECT `+traceCols+`
 FROM activity WHERE exploration_id=$1 AND node_id=$2 AND kind NOT IN ('thinking','usage','context_usage')
+AND `+modelActivitySQL("")+`
 AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, *nodeID, like, limit)
 	} else {
 		rows, err = s.db.Query(`SELECT `+traceCols+`
 FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND kind NOT IN ('thinking','usage','context_usage')
+AND `+modelActivitySQL("")+`
 AND (summary ILIKE $2 OR detail ILIKE $2) ORDER BY id LIMIT $3`, s.expID, like, limit)
 	}
 	if err != nil {
@@ -1845,6 +1849,7 @@ func (s *ExplorationStore) ActivityTraceSearchForTerminalIntent(nodeID int64, q 
 	WHERE a.exploration_id=$1 AND a.node_id=$2 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
 	  AND a.kind NOT IN ('thinking','usage','context_usage')
+	  AND `+modelActivitySQL("a")+`
 	  AND (a.summary ILIKE $3 OR a.detail ILIKE $3)
 	ORDER BY a.id LIMIT $4`, s.expID, nodeID, like, limit)
 	if err != nil {
@@ -1867,6 +1872,7 @@ func (s *ExplorationStore) ActivityTraceSearchTerminalIntents(q string, limit in
 	WHERE a.exploration_id=$1 AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
 	  AND a.kind NOT IN ('thinking','usage','context_usage')
+	  AND `+modelActivitySQL("a")+`
 	  AND (a.summary ILIKE $2 OR a.detail ILIKE $2)
 	ORDER BY a.id LIMIT $3`, s.expID, like, limit)
 	if err != nil {
@@ -1938,6 +1944,7 @@ func (s *ExplorationStore) ActivityTraceSearchExcluding(excludeNodeID int64, q s
 	rows, err := s.db.Query(`SELECT `+traceCols+`
 FROM activity WHERE exploration_id=$1 AND node_id IS NOT NULL AND node_id <> $2
 AND kind NOT IN ('thinking','usage','context_usage')
+AND `+modelActivitySQL("")+`
 AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, excludeNodeID, like, limit)
 	if err != nil {
 		return nil, err
@@ -1947,8 +1954,8 @@ AND (summary ILIKE $3 OR detail ILIKE $3) ORDER BY id LIMIT $4`, s.expID, exclud
 }
 
 // ActivityByIDs loads full detail for specific step ids (the trace drill-down),
-// scoped to this exploration. Reasoning/context metadata rows are skipped (even if
-// their id is asked for). Order is ascending id, not the input order.
+// scoped to this exploration. UI-only diagnostics and internal metadata rows are
+// skipped even when explicitly requested. Order is ascending id, not input order.
 func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 	if len(ids) == 0 {
 		return nil, nil
@@ -1961,7 +1968,7 @@ func (s *ExplorationStore) ActivityByIDs(ids []int64) ([]Activity, error) {
 		args[i+1] = id
 	}
 	rows, err := s.db.Query(`SELECT id, node_id, COALESCE(kind,''), COALESCE(tool,''), is_error, COALESCE(detail,'')
-FROM activity WHERE exploration_id=$1 AND kind NOT IN ('thinking','context_usage') AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
+FROM activity WHERE exploration_id=$1 AND `+modelActivitySQL("")+` AND id IN (`+strings.Join(ph, ",")+`) ORDER BY id`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1982,6 +1989,11 @@ FROM activity WHERE exploration_id=$1 AND kind NOT IN ('thinking','context_usage
 // source work, and thinking. Local callers that need legacy behavior use
 // ActivityByIDs instead.
 func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activity, error) {
+	return s.activityByIDsForTerminalIntents(ids, true)
+}
+
+// UI inherited-detail reads keep diagnostics; agent drill-downs filter them.
+func (s *ExplorationStore) activityByIDsForTerminalIntents(ids []int64, forModel bool) ([]Activity, error) {
 	if len(ids) == 0 {
 		return nil, nil
 	}
@@ -1992,12 +2004,16 @@ func (s *ExplorationStore) ActivityByIDsForTerminalIntents(ids []int64) ([]Activ
 		ph[i] = fmt.Sprintf("$%d", i+2)
 		args[i+1] = id
 	}
+	visible := ""
+	if forModel {
+		visible = " AND " + modelActivitySQL("a")
+	}
 	rows, err := s.db.Query(`SELECT a.id, a.node_id, COALESCE(a.kind,''), COALESCE(a.tool,''), a.is_error, COALESCE(a.detail,'')
 	FROM activity a
 	JOIN exploration_nodes n ON n.id=a.node_id AND n.exploration_id=a.exploration_id
 		WHERE a.exploration_id=$1 AND a.kind NOT IN ('thinking','usage','context_usage') AND n.kind='intent'
 	  AND n.state IN ('done','blocked','exhausted','stopped')
-	  AND a.id IN (`+strings.Join(ph, ",")+`) ORDER BY a.id`, args...)
+	  AND a.id IN (`+strings.Join(ph, ",")+`)`+visible+` ORDER BY a.id`, args...)
 	if err != nil {
 		return nil, err
 	}

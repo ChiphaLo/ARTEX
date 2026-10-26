@@ -48,8 +48,14 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	defer func() { reportRunOutcome(ctx, reason) }()
 	var lastContext *harness.ContextUsage
 	rec := func(r db.Activity) {
-		if lastContext != nil && (r.Kind == "usage" || r.Kind == "result") && len(r.Metadata) == 0 {
-			r.Metadata, _ = json.Marshal(map[string]any{"context_usage": lastContext})
+		if lastContext != nil && (r.Kind == "usage" || r.Kind == "result") {
+			metadata := map[string]any{}
+			_ = json.Unmarshal(r.Metadata, &metadata)
+			if metadata == nil {
+				metadata = map[string]any{}
+			}
+			metadata["context_usage"] = lastContext
+			r.Metadata, _ = json.Marshal(metadata)
 		}
 		if r.Kind == "text" || r.Kind == "tool_result" {
 			auditTrace.Append(db.InterceptContextEntry{Kind: r.Kind, Tool: r.Tool, ToolUseID: r.ToolUseID, Text: r.Detail, IsError: r.IsError})
@@ -145,10 +151,10 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			flush()
 			if ctx.Err() != nil { // engine/user cancellation, not a provider failure
 				sum, detail := terminalText(ctx, &harness.Terminal{Reason: reason, Err: ctx.Err()}, lastTool)
-				rec(activityWithUsage(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail}, lastUsage))
+				rec(activityWithUsage(uiDiagnostic(db.Activity{Kind: "result", Summary: firstLine(sum, 400), Detail: detail}, reason), lastUsage))
 				return finalText, reason, ctx.Err()
 			}
-			rec(activityWithUsage(db.Activity{Kind: "result", IsError: true, Summary: "执行出错: " + err.Error(), Detail: err.Error()}, lastUsage))
+			rec(activityWithUsage(uiDiagnostic(db.Activity{Kind: "result", IsError: true, Summary: "执行出错: " + err.Error(), Detail: err.Error()}, reason), lastUsage))
 			return finalText, reason, err
 		}
 		switch ev.Kind {
@@ -161,7 +167,7 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 			}
 		case harness.KindRetry:
 			flush()
-			rec(db.Activity{Kind: "retry", Summary: ev.Text, Detail: ev.Text})
+			rec(uiDiagnostic(db.Activity{Kind: "retry", Summary: ev.Text, Detail: ev.Text}, ""))
 		case harness.KindToolUse:
 			if ev.ToolUse == nil {
 				continue
@@ -206,22 +212,28 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 				}
 				finalText = ev.Terminal.Text
 				reason = ev.Terminal.Reason
+				diagnostic := strings.TrimSpace(ev.Terminal.Text) == "" || ev.Terminal.Err != nil ||
+					reason == harness.ReasonAbortedTools || reason == harness.ReasonAbortedStreaming
 				// the buffered tail text usually equals Terminal.Text (final answer);
 				// drop it to avoid a duplicate record, the result row carries it.
-				if tkind == "text" && strings.TrimSpace(tbuf.String()) == strings.TrimSpace(ev.Terminal.Text) {
+				if !diagnostic && tkind == "text" && strings.TrimSpace(tbuf.String()) == strings.TrimSpace(ev.Terminal.Text) {
 					tbuf.Reset()
 					tkind = ""
 				}
 				flush() // flush any trailing thinking / non-final text
 				sum, detail := ev.Terminal.Text, ev.Terminal.Text
-				if sum == "" || ev.Terminal.Reason == harness.ReasonAbortedTools || ev.Terminal.Reason == harness.ReasonAbortedStreaming {
+				if diagnostic {
 					sum, detail = terminalText(ctx, ev.Terminal, lastTool)
 				}
 				u := ev.Terminal.Usage // cumulative token usage for this session
-				rec(db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil,
+				result := db.Activity{Kind: "result", IsError: ev.Terminal.Err != nil,
 					Summary: firstLine(sum, 400), Detail: detail,
 					InputTokens: &u.InputTokens, OutputTokens: &u.OutputTokens,
-					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens})
+					CacheReadTokens: &u.CacheReadTokens, CacheWriteTokens: &u.CacheWriteTokens}
+				if diagnostic {
+					result = uiDiagnostic(result, reason)
+				}
+				rec(result)
 				if ev.Terminal.Err != nil {
 					rerr = ev.Terminal.Err
 				}
@@ -230,6 +242,22 @@ func captureRunSession(ctx context.Context, s *agentcore.Session, input string, 
 	}
 	flush() // safety: any unflushed text if the stream ended without KindResult
 	return finalText, reason, rerr
+}
+
+// Host diagnostics are still persisted/streamed to people, with the original
+// error and usage intact, but must not be replayed as agent-authored conclusions.
+func uiDiagnostic(a db.Activity, reason harness.TerminalReason) db.Activity {
+	metadata := map[string]any{}
+	_ = json.Unmarshal(a.Metadata, &metadata)
+	if metadata == nil {
+		metadata = map[string]any{}
+	}
+	metadata["ui_only"] = true
+	if reason != "" {
+		metadata["terminal_reason"] = reason
+	}
+	a.Metadata, _ = json.Marshal(metadata)
+	return a
 }
 
 var permanentSessionStatus = regexp.MustCompile(`(?i)(?:status(?:\s+code)?|http(?:\s+status)?)\s*[=:]?\s*(?:400|401|403|404|413|422)\b`)

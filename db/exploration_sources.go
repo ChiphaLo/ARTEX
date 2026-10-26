@@ -235,9 +235,9 @@ func (s *ExplorationStore) ActivityTraceWithSources(nodeID int64, limit int) ([]
 	return []Activity{}, nil
 }
 
-// ActivityListWithSources is the source-aware equivalent used by
-// get_worker_output. Node ids are global, so the first owning exploration is
-// unambiguous even when the work has not emitted any activity yet.
+// ActivityListWithSources is the source-aware human activity feed. Agent output
+// tools use LatestWorkerOutputWithSources instead, so UI diagnostics stay here.
+// Node ids are global, making the first owning exploration unambiguous.
 func (s *ExplorationStore) ActivityListWithSources(nodeID, sinceID int64, limit int) ([]Activity, int64, error) {
 	node, err := s.GetNode(nodeID)
 	if err != nil {
@@ -276,11 +276,20 @@ func (s *ExplorationStore) ActivityDetailWithSources(id int64) (string, error) {
 	if err != nil || detail != "" {
 		return detail, err
 	}
-	acts, err := s.ActivityByIDsWithSources([]int64{id})
-	if err != nil || len(acts) == 0 {
+	sources, err := s.DirectSourceStores()
+	if err != nil {
 		return "", err
 	}
-	return acts[0].Detail, nil
+	for _, source := range sources {
+		acts, err := source.Store.activityByIDsForTerminalIntents([]int64{id}, false)
+		if err != nil {
+			return "", err
+		}
+		if len(acts) > 0 {
+			return acts[0].Detail, nil
+		}
+	}
+	return "", nil
 }
 
 // ActivityTraceSearchWithSources performs the scoped worker-trace search used

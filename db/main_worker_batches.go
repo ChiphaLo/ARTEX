@@ -142,10 +142,10 @@ AND payload->>'main_batch_id'=$2`, b.ExplorationID, key).Scan(&total); err != ni
 	// Prefer the LAST result, not the first 1,000 activities. Bound in SQL before
 	// loading large output; the caller also imposes a total prompt size bound.
 	rows, err := d.Query(`SELECT n.id,n.state,left(COALESCE(n.payload->>'summary',''),600),
-left(COALESCE(NULLIF(a.detail,''),a.summary,n.delete_reason,n.blocked_reason,''),2400),COALESCE(a.is_error,false),COALESCE(a.worker,'')
+left(COALESCE(NULLIF(a.detail,''),a.summary,n.delete_reason,''),2400),COALESCE(a.is_error,n.state='blocked'),COALESCE(a.worker,'')
 FROM exploration_nodes n LEFT JOIN LATERAL (
- SELECT detail,summary,is_error,worker FROM activity WHERE exploration_id=n.exploration_id AND node_id=n.id
- AND kind IN ('result','text') ORDER BY (kind='result') DESC,id DESC LIMIT 1
+ SELECT detail,summary,is_error,worker FROM activity a WHERE exploration_id=n.exploration_id AND node_id=n.id
+ AND kind IN ('result','text') AND `+modelActivitySQL("a")+` ORDER BY (kind='result') DESC,id DESC LIMIT 1
 ) a ON true WHERE n.exploration_id=$1 AND n.kind='intent' AND n.payload->>'main_batch_id'=$2
 ORDER BY n.id LIMIT 64`, b.ExplorationID, key)
 	if err != nil {

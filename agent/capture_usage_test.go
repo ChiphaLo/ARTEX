@@ -74,6 +74,9 @@ func TestCaptureRetryPersistsFullErrorDetail(t *testing.T) {
 	_, reason, err := captureRun(ctx, agentcore.Options{Provider: provider}, "fixture", func(a db.Activity) {
 		if a.Kind == "retry" {
 			retries++
+			if !strings.Contains(string(a.Metadata), `"ui_only":true`) {
+				t.Fatalf("retry is not marked UI-only: %s", a.Metadata)
+			}
 			if a.Detail != a.Summary || !strings.HasSuffix(a.Detail, want) || a.IsError {
 				t.Fatalf("retry detail lost or marked terminal: %+v", a)
 			}
