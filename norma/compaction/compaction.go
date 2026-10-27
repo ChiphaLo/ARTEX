@@ -360,8 +360,23 @@ func (c *Compactor) autoCompact(ctx context.Context, msgs []llm.Message, preTok 
 	}
 	summary, err := c.summarize(ctx, toSummarize)
 	if err == nil && c.cfg.RequestThresholdPercent > 0 {
-		if strings.TrimSpace(summary) == "" || EstimateTokens([]llm.Message{llm.UserText(compactContinuationPreamble + summary)}) >= EstimateTokens(toSummarize) {
-			err = fmt.Errorf("context summary was empty or did not reduce the summarized history")
+		originalTokens := EstimateTokens(toSummarize)
+		summaryTokens := func(v string) int {
+			return EstimateTokens([]llm.Message{llm.UserText(compactContinuationPreamble + v)})
+		}
+		if strings.TrimSpace(summary) == "" {
+			err = fmt.Errorf("context summary was empty")
+		} else if summaryTokens(summary) >= originalTokens {
+			// The model sometimes returns a verbose summary larger than the original.
+			// Retry once on the summary itself; never replace history unless it shrinks.
+			shorter, retryErr := c.summarize(ctx, []llm.Message{llm.UserText("Condense the following summary substantially, preserving essential facts, decisions, and pending work:\n" + summary)})
+			if retryErr != nil {
+				err = fmt.Errorf("retrying oversized context summary: %w", retryErr)
+			} else if strings.TrimSpace(shorter) == "" || summaryTokens(shorter) >= originalTokens {
+				err = fmt.Errorf("context summary did not reduce the summarized history after a shorter retry")
+			} else {
+				summary = shorter
+			}
 		}
 	}
 	if err != nil {

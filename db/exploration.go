@@ -271,6 +271,25 @@ func (s *ExplorationStore) SetNodeState(id int64, state string) error {
 	return err
 }
 
+// SetGoalState changes only a goal belonging to this exploration.
+func (s *ExplorationStore) SetGoalState(id int64, state string) error {
+	if state != "open" && state != "met" && state != "abandoned" {
+		return fmt.Errorf("invalid goal state: %s", state)
+	}
+	res, err := s.db.Exec(`UPDATE exploration_nodes SET state=$1, content_version=content_version+1 WHERE id=$2 AND exploration_id=$3 AND kind='goal'`, state, id, s.expID)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("目标不存在")
+	}
+	return nil
+}
+
 // UpdateGoalPayload rewrites a goal node's payload text (and optional vulnclass);
 // scoped to kind='goal' so it can never mutate an intent/fact by id. Returns an
 // error if no such goal exists in this exploration.

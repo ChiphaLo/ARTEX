@@ -59,7 +59,7 @@ export function ContextWindowIndicator({ activity }: { activity: Activity[] }) {
             </span>
             <span className="text-xs opacity-70">输入估算 {contextTokens(usage.used_tokens)} tokens</span>
             <span className="text-xs opacity-70">输出与安全余量 {contextTokens(usage.reserved_tokens)} tokens</span>
-            <span className="text-xs opacity-70">90% 自动压缩 · 100% 裁剪兜底</span>
+            <span className="text-xs opacity-70">90% 尝试自动压缩 · 超过 100% 裁剪兜底</span>
             {usage.trimmed_messages > 0 && (
               <span className="text-xs opacity-70">本次已裁剪最旧的 {usage.trimmed_messages} 条上下文</span>
             )}

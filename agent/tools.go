@@ -1160,6 +1160,43 @@ func (t *ToolSet) listGoals() actool.CoreTool {
 		})
 }
 
+func (t *ToolSet) updateGoalState() actool.CoreTool {
+	return t.writeExpTool("update_goal_state", "修改本任务目标状态：open、met 或 abandoned。误标完成时可重新设为 open；标记 met 应优先使用 prove_goal 记录证据。仅修改状态，不自动恢复已暂停或结束的任务。", obj(map[string]any{"goal_id": idp("本任务目标 ID"), "state": map[string]any{"type": "string", "enum": []string{"open", "met", "abandoned"}}, "reason": str("修改原因")}, "goal_id", "state", "reason"), func(_ context.Context, in json.RawMessage) (actool.Result, error) {
+		var a struct {
+			GoalID json.RawMessage `json:"goal_id"`
+			State  string          `json:"state"`
+			Reason string          `json:"reason"`
+		}
+		if err := json.Unmarshal(in, &a); err != nil {
+			return actool.Errorf("invalid JSON"), nil
+		}
+		id := pid(a.GoalID)
+		if id <= 0 || strings.TrimSpace(a.Reason) == "" {
+			return actool.Errorf("goal_id 和 reason 必填"), nil
+		}
+		if a.State != "open" && a.State != "met" && a.State != "abandoned" {
+			return actool.Errorf("无效状态"), nil
+		}
+		n, err := t.ts.GetNode(id)
+		if err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		if n == nil || n.Kind != db.KindGoal {
+			return actool.Errorf("goal_id 必须是本任务的目标节点"), nil
+		}
+		if n.State == a.State {
+			return actool.Text("目标状态未变化"), nil
+		}
+		if err = t.ts.SetGoalState(id, a.State); err != nil {
+			return actool.Errorf(err.Error()), nil
+		}
+		if t.notify != nil {
+			t.notify()
+		}
+		return actool.Text(fmt.Sprintf("goal %d: %s → %s；原因: %s。暂停或结束的任务需手动继续。", id, n.State, a.State, a.Reason)), nil
+	})
+}
+
 func (t *ToolSet) proveGoal() actool.CoreTool {
 	return t.writeExpTool("prove_goal", "当你判断某个发现/事实证明了某个目标达成时调用：把证据节点连到目标节点，并标记目标 met。",
 		obj(map[string]any{
@@ -2027,7 +2064,7 @@ func (t *ToolSet) PlannerTools() []actool.CoreTool {
 		t.graphOverview(), t.listFindings(), t.listFacts(), t.nodeDetail(),
 		// cold-digest §6.1: restore folded cold nodes (digest body → members → detail).
 		t.expandDigest(),
-		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.addIntent(), t.proveGoal(), t.goalMet(),
+		t.getWorkerOutput(), t.getWorkerTrace(), t.searchAllWorkerTraces(), t.listGoals(), t.updateGoalState(), t.addIntent(), t.proveGoal(), t.goalMet(),
 		t.killWorkTool(), t.steerWorkTool(),
 		// report_finding：规划态势研判时若自身已确证漏洞，可直接登记（与 worker 同工具）。
 		t.addFinding(),

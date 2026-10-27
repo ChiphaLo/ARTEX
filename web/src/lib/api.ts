@@ -430,6 +430,8 @@ export const api = {
   updateGoal: (id: string, goalId: string, text: string, vulnclass?: string) =>
     patch<TaskGoal>(`/tasks/${id}/goals/${goalId}`, { text, vulnclass: vulnclass ?? "" }),
   // 人工删除目标（硬删除）：通知 planner，删除不复活任务。
+  updateGoalState: (id: string, goalId: string, state: "open" | "met" | "abandoned") =>
+    patch<TaskGoal>(`/tasks/${id}/goals/${goalId}/state`, { state }),
   deleteGoal: (id: string, goalId: string) => del<{ ok: boolean }>(`/tasks/${id}/goals/${goalId}`),
 
   // ---- 操作约束管理（总览）----

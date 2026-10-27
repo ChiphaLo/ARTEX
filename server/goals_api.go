@@ -134,6 +134,58 @@ func (s *Server) editGoal(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, goalDTO(updated))
 }
 
+// changeGoalState changes state only; it deliberately does not resume paused or completed tasks.
+func (s *Server) changeGoalState(w http.ResponseWriter, r *http.Request) {
+	t, ok := s.m.Task(r.PathValue("id"))
+	if !ok {
+		writeErr(w, 404, "task not found")
+		return
+	}
+	if !s.engine.beginTaskOperation(t.ID) {
+		writeErr(w, 409, "任务正在删除,无法修改目标")
+		return
+	}
+	defer s.engine.decInflight(t.ID)
+	id, err := strconv.ParseInt(r.PathValue("gid"), 10, 64)
+	if err != nil || id <= 0 {
+		writeErr(w, 400, "bad goal id")
+		return
+	}
+	var body struct {
+		State string `json:"state"`
+	}
+	if json.NewDecoder(r.Body).Decode(&body) != nil {
+		writeErr(w, 400, "invalid JSON")
+		return
+	}
+	if body.State != "open" && body.State != "met" && body.State != "abandoned" {
+		writeErr(w, 400, "invalid goal state")
+		return
+	}
+	node, err := t.Store.GetNode(id)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if node == nil || node.Kind != db.KindGoal {
+		writeErr(w, 404, "目标不存在")
+		return
+	}
+	if node.State != body.State {
+		if err = t.Store.SetGoalState(id, body.State); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		t.NotifyGoalEdited(goalDTO(node).Text, goalDTO(node).Text+" [状态: "+node.State+" → "+body.State+"]")
+	}
+	updated, err := t.Store.GetNode(id)
+	if err != nil || updated == nil {
+		writeErr(w, 500, "目标更新后读取失败")
+		return
+	}
+	writeJSON(w, 200, goalDTO(updated))
+}
+
 // deleteGoal 人工删除一个目标(硬删除,级联删边/锚点):删库 → 记「用户删除了该目标 X」
 // 触发唤醒 planner 据此重判剩余目标。按产品决策,删除【不】复活任务。
 func (s *Server) deleteGoal(w http.ResponseWriter, r *http.Request) {

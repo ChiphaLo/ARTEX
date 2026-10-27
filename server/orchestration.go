@@ -489,6 +489,7 @@ func (s *Server) seedOrchestrationTools() {
 	s.refreshBuiltinToolSchemas()
 	s.seedAutoDefaultBindings()
 	s.seedPlannerDefaultBindings()
+	s.seedMainListGoalsBinding()
 	s.seedPlannerListAssetsBinding()
 	s.seedCompanyScopeRebind()
 	s.seedWorkerReadToolsUnbind() // list_facts/list_companies/list_worker_traces 从 worker 默认解绑(一次性)
@@ -914,6 +915,19 @@ func (s *Server) seedAutoDefaultBindings() {
 	keys = append(keys, "insert_assets", "add_company_scope", "list_assets")
 	if err := s.m.pg.AddAgentToToolBinding("auto", keys); err != nil {
 		log.Printf("[auto] 默认绑定失败: %v", err)
+		return
+	}
+	_ = s.m.pg.SetSetting(flag, "true")
+}
+
+// Existing installations already have list_goals; add the main-agent default once.
+func (s *Server) seedMainListGoalsBinding() {
+	const flag = "main_list_goals_v1"
+	if v, _, _ := s.m.pg.GetSetting(flag); v == "true" {
+		return
+	}
+	if err := s.m.pg.AddAgentToToolBinding("mainagent", []string{"list_goals"}); err != nil {
+		log.Printf("[mainagent] list_goals 默认绑定失败: %v", err)
 		return
 	}
 	_ = s.m.pg.SetSetting(flag, "true")

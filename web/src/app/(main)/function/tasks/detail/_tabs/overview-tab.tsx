@@ -217,6 +217,14 @@ export function OverviewTab({ taskId }: { taskId: string }) {
     }
   };
 
+  const changeGoalState = async (g: TaskGoal, state: "open" | "met" | "abandoned") => {
+    if (state === g.state) return;
+    setGoalBusy(true); setGoalErr("");
+    try { await api.updateGoalState(taskId, g.id, state); await loadGoals(); }
+    catch (e) { setGoalErr(e instanceof Error ? e.message : "状态修改失败"); }
+    finally { setGoalBusy(false); }
+  };
+
   const removeGoal = async (g: TaskGoal) => {
     setGoals((prev) => prev.filter((x) => x.id !== g.id));
     try {
@@ -457,7 +465,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           <CardTitle className="flex items-center gap-2 text-base">
             <ListChecksIcon className="size-4 text-primary" /> 目标管理
             <span className="text-muted-foreground text-xs font-normal">
-              （最终可核验的目标，共 {goals.length} 条；新增/修改会通知规划者并复活任务）
+              （共 {goals.length} 条；状态修改不会自动继续已暂停或结束的任务）
             </span>
           </CardTitle>
         </CardHeader>
@@ -538,7 +546,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                   </div>
                 ) : (
                   <div key={g.id} className="flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-sm">
-                    <StatusBadge domain="goal" value={g.state} />
+                    <select aria-label={`修改目标状态 ${g.text}`} className="rounded border bg-background px-1 py-1 text-xs" value={g.state} disabled={goalBusy} onChange={(e) => void changeGoalState(g, e.target.value as "open" | "met" | "abandoned")}>
+                      <option value="open">进行中</option><option value="met">已达成</option><option value="abandoned">已放弃</option>
+                    </select>
                     <span className="min-w-0 flex-1 break-words">{g.text}</span>
                     {g.vulnclass && (
                       <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
