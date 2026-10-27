@@ -498,6 +498,17 @@ UPDATE tasks
 	return err
 }
 
+// ReopenCompletedTaskPaused changes only a completed task that has an open goal.
+// It does not run the task; the user must explicitly resume it.
+func (d *DB) ReopenCompletedTaskPaused(id int64) (bool, error) {
+	res, err := d.Exec(`UPDATE tasks SET status='running', paused=true, queued=false, queued_at=NULL, queue_mode='', completed_at=NULL WHERE id=$1 AND deleted_at IS NULL AND status='done' AND EXISTS (SELECT 1 FROM exploration_nodes WHERE exploration_id=tasks.exploration_id AND kind='goal' AND state='open')`, id)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
 // SetTerminalStatusGuarded sets a terminal status only when the task is NOT already
 // terminal, so a completed↔timeout race resolves to the first writer (won=true).
 // Returns won=false (no error) when another terminal status already stuck — the

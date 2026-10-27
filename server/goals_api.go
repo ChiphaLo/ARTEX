@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/Autumn-27/artex/agent"
 	"github.com/Autumn-27/artex/db"
 )
 
@@ -177,6 +178,31 @@ func (s *Server) changeGoalState(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		t.NotifyGoalEdited(goalDTO(node).Text, goalDTO(node).Text+" [状态: "+node.State+" → "+body.State+"]")
+	}
+	// Correct a completed task after reopening a goal, but leave it paused.
+	// Run this even on an idempotent open→open request to repair prior versions.
+	if body.State == "open" {
+		s.concMu.Lock()
+		current, exists := s.m.Task(t.ID)
+		if !exists || current != t || s.engine.IsDeleting(t.ID) {
+			s.concMu.Unlock()
+			writeErr(w, 409, "任务正在删除")
+			return
+		}
+		if t.lifecycleSnapshot().Status == "done" {
+			wasPaused := s.engine.IsPaused(t.ID)
+			s.engine.Pause(t.ID, agent.AbortPausedByUser)
+			var changed bool
+			changed, err = s.m.reopenCompletedTaskPaused(t.ID)
+			if (err != nil || !changed) && !wasPaused {
+				s.engine.Resume(t)
+			}
+		}
+		s.concMu.Unlock()
+		if err != nil {
+			writeErr(w, 500, "目标已更新，但任务状态修正失败："+err.Error())
+			return
+		}
 	}
 	updated, err := t.Store.GetNode(id)
 	if err != nil || updated == nil {

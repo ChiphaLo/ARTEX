@@ -218,9 +218,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
   };
 
   const changeGoalState = async (g: TaskGoal, state: "open" | "met" | "abandoned") => {
-    if (state === g.state) return;
+    // Allow open→open to repair tasks completed before state synchronization was added.
     setGoalBusy(true); setGoalErr("");
-    try { await api.updateGoalState(taskId, g.id, state); await loadGoals(); }
+    try { await api.updateGoalState(taskId, g.id, state); await loadGoals(); setTask(await api.task(taskId)); }
     catch (e) { setGoalErr(e instanceof Error ? e.message : "状态修改失败"); }
     finally { setGoalBusy(false); }
   };
@@ -465,7 +465,7 @@ export function OverviewTab({ taskId }: { taskId: string }) {
           <CardTitle className="flex items-center gap-2 text-base">
             <ListChecksIcon className="size-4 text-primary" /> 目标管理
             <span className="text-muted-foreground text-xs font-normal">
-              （共 {goals.length} 条；状态修改不会自动继续已暂停或结束的任务）
+              （共 {goals.length} 条；重新打开已完成任务的目标后，任务会变为暂停，需手动继续）
             </span>
           </CardTitle>
         </CardHeader>
@@ -550,6 +550,9 @@ export function OverviewTab({ taskId }: { taskId: string }) {
                       <option value="open">进行中</option><option value="met">已达成</option><option value="abandoned">已放弃</option>
                     </select>
                     <span className="min-w-0 flex-1 break-words">{g.text}</span>
+                    {g.state === "open" && task?.status === "done" && (
+                      <Button size="sm" variant="outline" disabled={goalBusy} onClick={() => void changeGoalState(g, "open")}>修正任务状态</Button>
+                    )}
                     {g.vulnclass && (
                       <span className="bg-muted text-muted-foreground shrink-0 rounded px-1.5 py-0.5 text-xs">
                         {g.vulnclass}

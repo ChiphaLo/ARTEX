@@ -1385,6 +1385,33 @@ func (m *Manager) StampTaskFirstRun(id string) (int64, error) {
 	return dlUnix, nil
 }
 
+// reopenCompletedTaskPaused persists and mirrors the done→paused correction.
+func (m *Manager) reopenCompletedTaskPaused(id string) (bool, error) {
+	m.taskStateMu.Lock()
+	defer m.taskStateMu.Unlock()
+	n, err := strconv.ParseInt(id, 10, 64)
+	if err != nil {
+		return false, err
+	}
+	changed, err := m.pg.ReopenCompletedTaskPaused(n)
+	if err != nil || !changed {
+		return changed, err
+	}
+	m.mu.Lock()
+	if t := m.tasks[id]; t != nil {
+		t.updateLifecycle(func(state *taskLifecycleState) {
+			state.Status = "running"
+			state.Paused = true
+			state.Queued = false
+			state.QueuedAt = 0
+			state.QueueMode = ""
+			state.CompletedAt = 0
+		})
+	}
+	m.mu.Unlock()
+	return true, nil
+}
+
 // SetTaskStatusGuarded sets a TERMINAL status only if the task isn't already terminal
 // (resolves the completed↔timeout race — first terminal writer wins). Reflects the
 // won status on the live handle. won=false means another terminal already stuck.
