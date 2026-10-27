@@ -14,6 +14,11 @@ test("distinguishes local queue, HTTP headers, first byte and receiving",()=>{
  assert.match(modelProgressLabel([status({phase:"waiting_first_byte"})],20000),/首字节/);
  assert.match(modelProgressLabel([status({phase:"receiving",bytes_received:2048,last_data_at:18000})],20000),/2.0 KiB.*2s/);
 });
+test("old connecting event is a potentially stale status, not proof of an active request",()=>{
+ assert.match(modelProgressLabel([status({})],8_015_000),/状态可能已失联/);
+ assert.doesNotMatch(modelProgressLabel([status({})],8_015_000),/已等待 8005s/);
+ assert.match(modelProgressLabel([status({})],140_000),/响应头/);
+});
 test("hidden compaction shows batch progress without becoming an assistant reply",()=>{
  assert.match(modelProgressLabel([status({stage:"compacting",phase:"receiving",chunk:2,groups_done:20,total_groups:50,bytes_received:4096,last_data_at:1000})],2000),/压缩上下文.*第 2 批.*20\/50.*4.0 KiB/);
  assert.match(modelProgressLabel([status({stage:"compacting",phase:"chunk_finished",groups_done:50,total_groups:50})],2000),/本批摘要完成/);

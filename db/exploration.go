@@ -2,6 +2,7 @@ package db
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -361,8 +362,12 @@ WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, state, id, s.expID, termin
 // state still matches expected. It is the state boundary used by pause/resume and
 // worker settlement, so a stale API read cannot overwrite a concurrent finish.
 func (s *ExplorationStore) CompareAndSetIntentState(id int64, expected, state string) (bool, error) {
+	return s.CompareAndSetIntentStateContext(context.Background(), id, expected, state)
+}
+
+func (s *ExplorationStore) CompareAndSetIntentStateContext(ctx context.Context, id int64, expected, state string) (bool, error) {
 	terminal := state == "done" || state == "blocked" || state == "exhausted" || state == "stopped"
-	res, err := s.db.Exec(`UPDATE exploration_nodes
+	res, err := s.db.ExecContext(ctx, `UPDATE exploration_nodes
 SET state=$1, blocked_reason=NULL, content_version=content_version+1, completed_at = CASE WHEN $5 THEN now() ELSE NULL END
 WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, state, id, s.expID, expected, terminal)
 	if err != nil {

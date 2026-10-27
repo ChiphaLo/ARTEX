@@ -1,6 +1,7 @@
 package db
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"strings"
@@ -602,6 +603,19 @@ func (s *ExplorationStore) SetIntentBlockedReason(id int64, reason string) error
 SET state='blocked', blocked_reason=NULLIF($1,''), completed_at=now()
 WHERE id=$2 AND exploration_id=$3 AND kind='intent'`, reason, id, s.expID)
 	return err
+}
+
+// CompareAndSetIntentBlockedReasonContext fences delayed worker settlement so it cannot
+// overwrite a newer pause, resume or deletion while the database was unavailable.
+func (s *ExplorationStore) CompareAndSetIntentBlockedReasonContext(ctx context.Context, id int64, expected, reason string) (bool, error) {
+	res, err := s.db.ExecContext(ctx, `UPDATE exploration_nodes
+SET state='blocked', blocked_reason=NULLIF($1,''), completed_at=now(), content_version=content_version+1
+WHERE id=$2 AND exploration_id=$3 AND kind='intent' AND state=$4`, reason, id, s.expID, expected)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (s *ExplorationStore) ReopenIntentsByBlockedReason(reason string) (int64, error) {

@@ -21,6 +21,12 @@ export function modelProgressLabel(activity: Activity[], now: number): string {
       case "starting":
         return `${prefix}准备请求…`;
       case "connecting":
+        // The server bounds header waits at 120s. A much older last progress
+        // event can be stale after DB/SSE failure; never assert it is still a
+        // live upstream request merely because the timestamp keeps aging.
+        if (p.started_at && now - p.started_at > 130_000) {
+          return `${prefix}连接进度已超过预期，状态可能已失联；请检查会话状态`;
+        }
         return `${prefix}连接上游／等待响应头${elapsed}`;
       case "waiting_first_byte":
         return `${prefix}已收到响应头，等待首字节${elapsed}`;

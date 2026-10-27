@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -184,7 +185,15 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 			return out, fmt.Errorf("仅运行中的意图可以暂停")
 		}
 		if err := s.engine.ControlWork(ctx, iid, "pause"); err != nil {
-			return out, err
+			if !errors.Is(err, errWorkControlConflict) {
+				return out, err
+			}
+			if handled, settleErr := s.engine.pausePendingWorker(ctx, t, iid); !handled || settleErr != nil {
+				if settleErr != nil {
+					return out, settleErr
+				}
+				return out, err
+			}
 		}
 		out.State = "paused"
 	case "resume":
@@ -216,7 +225,15 @@ func (s *Server) applyIntentControl(ctx context.Context, t *Task, iid int64, act
 		}
 		if node.State == "running" {
 			if err := s.engine.ControlWork(ctx, iid, "cancel"); err != nil {
-				return out, err
+				if !errors.Is(err, errWorkControlConflict) {
+					return out, err
+				}
+				if handled, settleErr := s.engine.pausePendingWorker(ctx, t, iid); !handled || settleErr != nil {
+					if settleErr != nil {
+						return out, settleErr
+					}
+					return out, err
+				}
 			}
 		}
 		summary := intentSummaryOf(node)
